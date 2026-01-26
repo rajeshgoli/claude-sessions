@@ -1,0 +1,31 @@
+# Claude Session Manager Configuration
+# Copy this file to config.yaml and fill in your values
+
+server:
+  host: "127.0.0.1"
+  port: 8420
+
+paths:
+  log_dir: "/tmp/claude-sessions"
+  state_file: "/tmp/claude-sessions/sessions.json"
+
+monitor:
+  # Seconds of inactivity before sending idle notification
+  idle_timeout: 300
+  # How often to check for new output (seconds)
+  poll_interval: 1.0
+
+telegram:
+  # Bot token from @BotFather (required for Telegram integration)
+  token: "YOUR_BOT_TOKEN_HERE"
+  # Optional: restrict bot to specific chat IDs (leave empty to allow all)
+  allowed_chat_ids: []
+  # allowed_chat_ids:
+  #   - 123456789
+  #   - 987654321
+
+email:
+  # Paths to email harness config files
+  # Leave empty to use defaults from ../claude-email-automation/
+  smtp_config: ""
+  imap_config: ""
