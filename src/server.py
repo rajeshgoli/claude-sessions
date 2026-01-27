@@ -429,6 +429,11 @@ def create_app(
             message = payload.get("message", "")
             logger.info(f"Claude notification: {notification_type} - {message}")
 
+            # Skip idle notifications - user doesn't want them (gets Stop hooks anyway)
+            if notification_type == "idle_prompt":
+                logger.debug(f"Skipping idle_prompt notification (filtered out)")
+                return {"status": "received", "hook_event": hook_event}
+
             # Send notification to Telegram for permission prompts and errors
             if app.state.notifier and app.state.session_manager:
                 # Try to find the session
