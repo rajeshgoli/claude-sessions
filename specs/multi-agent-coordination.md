@@ -98,13 +98,14 @@ sm spawn <agent-type> "<prompt>" [options]
 - `prompt`: Initial prompt/task for the child agent
 
 **Options:**
-- `--model <model>`: Override default model (opus, sonnet, haiku)
-- `--args "<args>"`: Additional Claude Code arguments
+- `--model <model>`: Choose model for this task (opus, sonnet, haiku) - context-dependent choice
 - `--preset <name>`: Use named preset from config
 - `--parent <session-id>`: Explicit parent (defaults to current session)
 - `--working-dir <path>`: Override working directory
 - `--name <friendly-name>`: Set friendly name
 - `--json`: Return JSON output
+
+**Note:** Agents can only specify the model. The Claude Code command and arguments are user-controlled via `config.yaml` and cannot be overridden by agents.
 
 **Returns:**
 ```json
@@ -122,15 +123,18 @@ sm spawn <agent-type> "<prompt>" [options]
 
 **Example:**
 ```bash
-# Basic spawn
+# Basic spawn (uses default model from config for Engineer)
 $ sm spawn Engineer "Implement API endpoint for user login"
 Spawned engineer-abc123 (abc123) in tmux session claude-abc123
 
-# With options
-$ sm spawn Architect "Review PR #1042" --model opus --name architect-pr1042
+# Agent chooses opus for complex task requiring deep reasoning
+$ sm spawn Engineer "Design and implement distributed lock mechanism" --model opus --name engineer-lock
 
-# With preset
-$ sm spawn Engineer "Fix bug" --preset quick-fix
+# Agent chooses haiku for simple, quick task
+$ sm spawn Engineer "Fix typo in README" --model haiku
+
+# With preset (uses user-configured preset settings)
+$ sm spawn Engineer "Quick syntax fix in login.py" --preset quick-fix
 ```
 
 ### `sm children` - List Child Sessions
@@ -311,33 +315,37 @@ Input sent to session def456
 
 ```yaml
 claude:
-  # Default command and arguments for Claude Code
+  # User-controlled: Command and arguments for spawning Claude Code
+  # Agents CANNOT override these - only user can configure via this file
   default_command: "claude"
   default_args:
     - "--bypass-permissions"
 
   # Per-agent-type configurations
+  # model: Default model (can be overridden by agent via --model flag)
+  # args: User-controlled arguments (CANNOT be overridden by agents)
   agent_configs:
     Engineer:
-      model: "sonnet"
+      model: "sonnet"  # Default, but agent can choose opus/haiku based on task
       args:
         - "--bypass-permissions"
 
     Architect:
-      model: "opus"
+      model: "opus"  # Default for architecture work
       args:
         - "--plan"
 
     Explore:
-      model: "haiku"
+      model: "haiku"  # Fast and cheap for exploration
       args:
         - "--bypass-permissions"
 
     general-purpose:
-      model: "sonnet"
+      model: "sonnet"  # Balanced default
       args: []
 
-  # Named presets
+  # Named presets - user-controlled shortcuts
+  # Agents use via --preset flag, cannot modify the preset contents
   presets:
     quick-fix:
       model: "sonnet"
@@ -394,12 +402,27 @@ sessions:
     fallback: "{agent_type}-{short_id}"      # e.g., engineer-abc123
 ```
 
-### Per-Session Override
+### Agent Control vs User Control
 
-Child sessions can override config via spawn arguments:
+**User-controlled (configured in `config.yaml` only):**
+- Claude Code command and all arguments
+- Per-agent-type default arguments
+- Named preset definitions
 
+**Agent-controlled (can specify at spawn time):**
+- Model selection via `--model <model>` flag (context-dependent choice based on task complexity)
+- Preset selection via `--preset <name>` flag (chooses from user-defined presets)
+
+**Example:**
 ```bash
-sm spawn Engineer "Task" --model opus  # Override model
+# Agent chooses opus for complex reasoning task, uses Engineer's user-configured args
+sm spawn Engineer "Design distributed consensus algorithm" --model opus
+
+# Agent chooses haiku for simple exploration, uses Explore's user-configured args
+sm spawn Explore "List all TypeScript files" --model haiku
+
+# Agent uses preset (user defined the preset contents)
+sm spawn Engineer "Quick syntax fix" --preset quick-fix
 ```
 
 ## Lifecycle Management
