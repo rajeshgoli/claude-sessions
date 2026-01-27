@@ -25,6 +25,9 @@ class SessionResponse(BaseModel):
     status: str
     created_at: str
     last_activity: str
+    friendly_name: Optional[str] = None
+    current_task: Optional[str] = None
+    git_remote_url: Optional[str] = None
 
 
 class SendInputRequest(BaseModel):
@@ -117,6 +120,9 @@ def create_app(
             status=session.status.value,
             created_at=session.created_at.isoformat(),
             last_activity=session.last_activity.isoformat(),
+            friendly_name=session.friendly_name,
+            current_task=session.current_task,
+            git_remote_url=session.git_remote_url,
         )
 
     @app.get("/sessions")
@@ -136,6 +142,9 @@ def create_app(
                     status=s.status.value,
                     created_at=s.created_at.isoformat(),
                     last_activity=s.last_activity.isoformat(),
+                    friendly_name=s.friendly_name,
+                    current_task=s.current_task,
+                    git_remote_url=s.git_remote_url,
                 )
                 for s in sessions
             ]
@@ -159,7 +168,56 @@ def create_app(
             status=session.status.value,
             created_at=session.created_at.isoformat(),
             last_activity=session.last_activity.isoformat(),
+            friendly_name=session.friendly_name,
+            current_task=session.current_task,
+            git_remote_url=session.git_remote_url,
         )
+
+    @app.patch("/sessions/{session_id}", response_model=SessionResponse)
+    async def update_session(
+        session_id: str,
+        friendly_name: Optional[str] = Body(None, embed=True)
+    ):
+        """Update session metadata (currently only friendly_name)."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        session = app.state.session_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        if friendly_name is not None:
+            session.friendly_name = friendly_name
+            app.state.session_manager._save_state()
+            # Update tmux status bar
+            app.state.session_manager.tmux.set_status_bar(session.tmux_session, friendly_name)
+
+        return SessionResponse(
+            id=session.id,
+            name=session.name,
+            working_dir=session.working_dir,
+            status=session.status.value,
+            created_at=session.created_at.isoformat(),
+            last_activity=session.last_activity.isoformat(),
+            friendly_name=session.friendly_name,
+            current_task=session.current_task,
+            git_remote_url=session.git_remote_url,
+        )
+
+    @app.put("/sessions/{session_id}/task")
+    async def update_task(session_id: str, task: str = Body(..., embed=True)):
+        """Register what the session is currently working on."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        session = app.state.session_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        session.current_task = task
+        app.state.session_manager._save_state()
+
+        return {"session_id": session_id, "task": task}
 
     @app.post("/sessions/{session_id}/input")
     async def send_input(session_id: str, request: SendInputRequest):

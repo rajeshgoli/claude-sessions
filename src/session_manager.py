@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable, Awaitable
@@ -72,6 +73,32 @@ class SessionManager:
             except Exception as e:
                 logger.error(f"Event handler error: {e}")
 
+    def _get_git_remote_url(self, working_dir: str) -> Optional[str]:
+        """
+        Get the git remote URL for a working directory.
+
+        Args:
+            working_dir: Directory to check
+
+        Returns:
+            Git remote URL or None if not a git repo
+        """
+        try:
+            working_path = Path(working_dir).expanduser().resolve()
+            result = subprocess.run(
+                ["git", "config", "--get", "remote.origin.url"],
+                cwd=working_path,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+            return None
+        except Exception as e:
+            logger.debug(f"Failed to get git remote for {working_dir}: {e}")
+            return None
+
     def create_session(
         self,
         working_dir: str,
@@ -93,6 +120,9 @@ class SessionManager:
             working_dir=working_dir,
             telegram_chat_id=telegram_chat_id,
         )
+
+        # Detect git remote URL for repo matching
+        session.git_remote_url = self._get_git_remote_url(working_dir)
 
         if name:
             session.name = name

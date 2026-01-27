@@ -41,6 +41,8 @@ class Session:
     error_message: Optional[str] = None
     transcript_path: Optional[str] = None  # Claude's transcript file path
     friendly_name: Optional[str] = None  # User-friendly name
+    current_task: Optional[str] = None  # What the session is currently working on
+    git_remote_url: Optional[str] = None  # Git remote URL for repo matching
 
     def __post_init__(self):
         if not self.name:
@@ -65,6 +67,8 @@ class Session:
             "error_message": self.error_message,
             "transcript_path": self.transcript_path,
             "friendly_name": self.friendly_name,
+            "current_task": self.current_task,
+            "git_remote_url": self.git_remote_url,
         }
 
     @classmethod
@@ -85,6 +89,8 @@ class Session:
             error_message=data.get("error_message"),
             transcript_path=data.get("transcript_path"),
             friendly_name=data.get("friendly_name"),
+            current_task=data.get("current_task"),
+            git_remote_url=data.get("git_remote_url"),
         )
 
 
