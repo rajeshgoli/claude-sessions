@@ -41,6 +41,7 @@ dev = [
 
 [project.scripts]
 claude-session-manager = "src.main:run"
+sm = "src.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
