@@ -126,6 +126,7 @@ The `sm` CLI tool enables Claude sessions to coordinate with each other. It's au
 | `sm who` | List other sessions in same workspace |
 | `sm what <session-id> [--deep]` | Get AI summary of what a session is doing |
 | `sm others [--repo]` | List others with summaries |
+| `sm all [--summaries]` | List all sessions system-wide across all directories |
 | `sm alone` | Check if you're the only agent (exit code 0=alone, 1=others) |
 | `sm task "<description>"` | Register what you're working on |
 | `sm status` | Full status: you + others + lock file |
@@ -177,6 +178,11 @@ engineer-db (a1b2c3d4) | running | 5min ago
 # See what they're doing
 $ sm what a1b2c3d4
 Working on database migration script for users table.
+
+# List all sessions across all projects
+$ sm all
+office-automate (fc7d7dbc) | idle | ~/Desktop/automation/office-automate
+engineer-db (a1b2c3d4) | running | ~/projects/myapp
 
 # Register your task to avoid conflicts
 $ sm task "Implementing user authentication API"
