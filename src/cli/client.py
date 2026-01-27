@@ -25,7 +25,7 @@ class SessionManagerClient:
         self.api_url = api_url or os.environ.get("SM_API_URL", DEFAULT_API_URL)
         self.session_id = os.environ.get("CLAUDE_SESSION_MANAGER_ID")
 
-    def _request(self, method: str, path: str, data: Optional[dict] = None) -> tuple[Optional[dict], bool, bool]:
+    def _request(self, method: str, path: str, data: Optional[dict] = None, timeout: Optional[int] = None) -> tuple[Optional[dict], bool, bool]:
         """
         Make an HTTP request.
 
@@ -33,6 +33,7 @@ class SessionManagerClient:
             method: HTTP method (GET, POST, PUT, PATCH, DELETE)
             path: API path
             data: Optional JSON data
+            timeout: Optional timeout in seconds (default: API_TIMEOUT)
 
         Returns:
             Tuple of (response_data, success, unavailable)
@@ -41,13 +42,14 @@ class SessionManagerClient:
             - success=False, unavailable=False: API error (4xx, 5xx response)
         """
         url = f"{self.api_url}{path}"
+        request_timeout = timeout if timeout is not None else API_TIMEOUT
 
         try:
             headers = {"Content-Type": "application/json"}
             body = json.dumps(data).encode() if data else None
 
             req = urllib.request.Request(url, data=body, headers=headers, method=method)
-            with urllib.request.urlopen(req, timeout=API_TIMEOUT) as response:
+            with urllib.request.urlopen(req, timeout=request_timeout) as response:
                 if response.status in (200, 201):
                     return json.loads(response.read().decode()), True, False
                 # API responded but with error status
@@ -102,7 +104,8 @@ class SessionManagerClient:
 
     def get_summary(self, session_id: str, lines: int = 100) -> Optional[str]:
         """Get AI-generated summary of session activity."""
-        data, success, _ = self._request("GET", f"/sessions/{session_id}/summary?lines={lines}")
+        # Summary generation can take up to 60s, use longer timeout
+        data, success, _ = self._request("GET", f"/sessions/{session_id}/summary?lines={lines}", timeout=65)
         if success and data:
             return data.get("summary")
         return None
