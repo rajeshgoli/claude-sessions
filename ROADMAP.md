@@ -1,5 +1,66 @@
 # Claude Session Manager - Roadmap
 
+## Recent Work (2026-01-27)
+
+### Session Continuation Context
+This section helps the next AI agent continue from where we left off.
+
+**What was completed in this session:**
+
+1. **Idle Notification Filtering** (server.py)
+   - Added filter to skip `idle_prompt` notifications from Claude Code hooks
+   - User was getting duplicate messages (Stop hook + idle_prompt notification)
+   - Now only Stop hooks send notifications, idle_prompt hooks are logged but not forwarded
+   - Location: `server.py:432-435`
+
+2. **Summary API Endpoint** (server.py)
+   - Added `GET /sessions/{session_id}/summary?lines=100` endpoint
+   - Generates AI-powered summaries using Claude Haiku
+   - Uses async subprocess execution (60s timeout)
+   - Mirrors functionality of Telegram `/summary` command
+   - Returns JSON: `{"session_id": "...", "summary": "..."}`
+   - Location: `server.py:266-356`
+
+3. **Documentation**
+   - Created ROADMAP.md with future feature ideas
+   - Created CODEBASE_OVERVIEW.md (earlier in session history)
+
+**Current System State:**
+- All sessions using `CLAUDE_SESSION_MANAGER_ID` env var for reliable identification
+- Notification filtering via config.yaml (only permission_prompts enabled by default)
+- Tmux status bars show friendly names when set via `/name`
+- Session activity tracking works correctly with last_activity field
+- No known bugs or issues
+
+**Environment Variables Used:**
+- `CLAUDE_SESSION_MANAGER_ID`: Set in tmux session, passed to Claude Code hooks for session identification
+
+**Key Files Modified Recently:**
+- `src/server.py`: Added summary endpoint, idle_prompt filtering
+- `src/telegram_bot.py`: Session identification fixes, `/summary` command (earlier)
+- `src/output_monitor.py`: Activity tracking fixes (earlier)
+- `src/tmux_controller.py`: Status bar updates (earlier)
+- `src/notifier.py`: Message truncation removal (earlier)
+- `src/main.py`: Handler wiring (earlier)
+
+**Testing Status:**
+- Summary API endpoint: Code complete, not yet tested via HTTP
+- Idle prompt filtering: Code complete, awaiting user confirmation
+- All previous features: Tested and working
+
+**Next Steps (if requested):**
+- Test the new `/sessions/{id}/summary` endpoint via curl/HTTP
+- Monitor if idle_prompt filtering resolves user's duplicate notification issue
+- Consider implementing "User Input Detection from Tmux" if user requests it (see Backlog below)
+
+**Git Status:**
+- Latest commit: `e3a48f3` - Add /sessions/{id}/summary API endpoint
+- Previous commit: `fb6e68a` - Add ROADMAP.md and filter idle_prompt notifications
+- Branch: `main`
+- Remote: `https://github.com/rajeshgoli/claude-sessions.git`
+
+---
+
 ## Backlog (Not Prioritized)
 
 ### User Input Detection from Tmux
@@ -82,12 +143,13 @@
 - ✅ Forum topic organization
 - ✅ Friendly session naming
 - ✅ Tmux status bar updates
-- ✅ AI-powered session summaries
+- ✅ AI-powered session summaries (Telegram `/summary` + HTTP API)
 - ✅ Session activity tracking
-- ✅ Notification filtering (config-based)
-- ✅ Message retrieval (`/message` command)
+- ✅ Notification filtering (config-based + idle_prompt hook filtering)
+- ✅ Message retrieval (`/message` command + `/last-message` API)
 - ✅ Terminal attachment
 - ✅ Session interrupt (Escape key)
+- ✅ REST API for all core operations (sessions, input, output, summary)
 
 ---
 
