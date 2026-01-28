@@ -55,6 +55,9 @@ Log all Claude Code tool usage to a local SQLite database for security auditing,
 # Log tool usage to session manager API
 # Called by Claude Code PreToolUse/PostToolUse hooks
 
+FALLBACK_DIR="${HOME}/.local/share/claude-sessions"
+FALLBACK_FILE="${FALLBACK_DIR}/tool_usage_fallback.jsonl"
+
 INPUT=$(cat)
 
 # Inject session ID if available
@@ -62,10 +65,17 @@ if [ -n "$CLAUDE_SESSION_MANAGER_ID" ]; then
   INPUT=$(echo "$INPUT" | jq --arg sid "$CLAUDE_SESSION_MANAGER_ID" '. + {session_manager_id: $sid}')
 fi
 
-# Post to session manager (async - don't block Claude)
-curl -s -X POST http://localhost:8420/hooks/tool-use \
-  -H "Content-Type: application/json" \
-  -d "$INPUT" &>/dev/null &
+# Post to session manager with timeout protection (async - don't block Claude)
+# timeout 5s for process, --max-time 3s for curl response
+(
+  if ! timeout 5 curl -s --max-time 3 -X POST http://localhost:8420/hooks/tool-use \
+    -H "Content-Type: application/json" \
+    -d "$INPUT" &>/dev/null; then
+    # Fallback: append to local file if API fails
+    mkdir -p "$FALLBACK_DIR"
+    echo "$INPUT" >> "$FALLBACK_FILE"
+  fi
+) &
 
 exit 0
 ```
@@ -74,6 +84,8 @@ exit 0
 - Fire and forget (async) - don't slow down Claude
 - Always exit 0 - logging failure shouldn't break Claude
 - Use existing `CLAUDE_SESSION_MANAGER_ID` env var
+- Timeout protection: 5s process timeout + 3s curl max-time prevents zombie processes
+- Fallback file: On API failure, logs to `~/.local/share/claude-sessions/tool_usage_fallback.jsonl`
 
 ---
 
@@ -294,7 +306,7 @@ SENSITIVE_FILE_PATTERNS = [
 class ToolLogger:
     """Logs tool usage to SQLite database."""
 
-    def __init__(self, db_path: str = "/tmp/claude-sessions/tool_usage.db"):
+    def __init__(self, db_path: str = "~/.local/share/claude-sessions/tool_usage.db"):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
@@ -544,12 +556,11 @@ sm tools --export csv       # Export to CSV
 
 **Problem:** Hook script fails (curl timeout, API down, etc.)
 
-**Solutions:**
-- Always exit 0 from hook script
-- Log failures locally to a fallback file
-- Retry queue for failed posts
-
-**Recommendation:** Exit 0 + fallback file. Don't block Claude.
+**Solution:** ✅ Implemented in hook script:
+- Always exit 0 - don't block Claude
+- Timeout protection (5s process + 3s curl) prevents zombie processes
+- Fallback file: `~/.local/share/claude-sessions/tool_usage_fallback.jsonl`
+- On API failure, logs are appended to fallback file for later processing
 
 ### 3. Missing Session ID
 
@@ -688,7 +699,7 @@ LIMIT 24;
 ```yaml
 tool_logging:
   enabled: true
-  db_path: "/tmp/claude-sessions/tool_usage.db"
+  db_path: "~/.local/share/claude-sessions/tool_usage.db"
 
   # Retention
   retention_days: 30
