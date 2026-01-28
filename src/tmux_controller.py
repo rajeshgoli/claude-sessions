@@ -230,13 +230,12 @@ class TmuxController:
             if initial_prompt:
                 # Give Claude time to initialize
                 time.sleep(0.5)
-                # Send the prompt
-                self._run_tmux(
-                    "send-keys",
-                    "-t", session_name,
-                    initial_prompt,
-                    "Enter",
-                )
+                # Send the prompt using same method as send_input()
+                import shlex
+                escaped_text = shlex.quote(initial_prompt)
+                cmd = f'tmux send-keys -t {session_name} {escaped_text} && sleep 1 && tmux send-keys -t {session_name} Enter'
+                subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+                logger.info(f"Sent initial prompt to {session_name}: {initial_prompt[:50]}...")
 
             logger.info(f"Created child session {session_name} (id={session_id}) with command {' '.join(cmd_parts)}")
             return True
