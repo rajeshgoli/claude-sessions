@@ -181,11 +181,13 @@ engineer-task1043 (def456) | running   | 2min ago
 
 **Syntax:**
 ```bash
-sm kill <session-id> [--force]
+sm kill <session-id>
 ```
 
-**Options:**
-- `--force`: Force immediate kill (SIGKILL). Default is graceful (sends Escape to interrupt).
+**Behavior:**
+- Terminates the tmux session (ends the shell)
+- Equivalent to user typing `/exit` in Claude Code
+- Cleanly shuts down the child session
 
 **Security:**
 - **ONLY allows killing your own children** - cannot kill arbitrary sessions
@@ -195,13 +197,9 @@ sm kill <session-id> [--force]
 
 **Example:**
 ```bash
-# Graceful termination (sends Escape key to your child)
+# Terminate your child session
 $ sm kill def456
 Session def456 terminated
-
-# Force kill (immediate SIGKILL)
-$ sm kill def456 --force
-Session def456 force killed
 
 # Trying to kill unrelated session
 $ sm kill xyz789
@@ -554,21 +552,24 @@ Terminal States:
 
 ### Termination Handling
 
-**Graceful Shutdown:**
+**Terminating Child Sessions:**
 ```bash
-# Send Escape to interrupt gracefully
+# Terminate child session (kills tmux session)
 sm kill def456
-
-# Or force immediate kill
-sm kill def456 --force
 ```
+
+This:
+- Terminates the tmux session
+- Ends the shell/Claude Code process
+- Equivalent to user typing `/exit`
+- Only works on your own children (parent-child check)
 
 **Cleanup Options:**
 ```yaml
 cleanup:
-  auto_kill_on_complete: false  # Keep tmux session
-  auto_archive_transcript: true # Save transcript
-  close_tmux_session: false     # Don't destroy tmux
+  auto_kill_on_complete: false  # Keep tmux session after completion
+  auto_archive_transcript: true # Save transcript on termination
+  close_tmux_session: false     # Don't destroy tmux on auto-complete
 ```
 
 **Parent Responsibilities:**
