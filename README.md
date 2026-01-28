@@ -131,7 +131,7 @@ The `sm` CLI tool enables Claude sessions to coordinate with each other. It's au
 | `sm task "<description>"` | Register what you're working on |
 | `sm status` | Full status: you + others + lock file |
 | `sm subagents <session-id>` | List subagents spawned by a session |
-| `sm send <session-id> "<text>"` | Send input to any session |
+| `sm send <session-id> "<text>"` | Send input to any session (includes sender metadata) |
 
 ### Subagent Tracking
 
@@ -192,9 +192,13 @@ $ sm task "Implementing user authentication API"
 $ sm send engineer-db "Database migration complete, you can proceed"
 Input sent to engineer-db (a1b2c3d4)
 
-$ sm send a1b2c3d4 "Additional context..."
-Input sent to engineer-db (a1b2c3d4)
+# When sent from a managed session, includes sender metadata:
+# The receiving agent sees:
+# [Input from: architect-pr1032 (08bc57cf) via sm send]
+# Database migration complete, you can proceed
 ```
+
+**Note:** When `sm send` is called from within a managed session, it automatically includes sender metadata so the receiving agent knows who sent the message. When called from a terminal outside a session, the message is sent without metadata.
 
 **Tracking subagents:**
 ```bash

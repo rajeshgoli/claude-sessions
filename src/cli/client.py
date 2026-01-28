@@ -149,20 +149,25 @@ class SessionManagerClient:
             return data.get("subagents", [])
         return None
 
-    def send_input(self, session_id: str, text: str) -> tuple[bool, bool]:
+    def send_input(self, session_id: str, text: str, sender_session_id: Optional[str] = None) -> tuple[bool, bool]:
         """
         Send text input to a session.
 
         Args:
             session_id: Target session ID
             text: Text to send to the session's Claude input
+            sender_session_id: Optional sender session ID (for metadata)
 
         Returns:
             Tuple of (success, unavailable)
         """
+        payload = {"text": text}
+        if sender_session_id:
+            payload["sender_session_id"] = sender_session_id
+
         data, success, unavailable = self._request(
             "POST",
             f"/sessions/{session_id}/input",
-            {"text": text}
+            payload
         )
         return success, unavailable

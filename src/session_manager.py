@@ -195,14 +195,36 @@ class SessionManager:
             session.telegram_root_msg_id = message_id
             self._save_state()
 
-    def send_input(self, session_id: str, text: str) -> bool:
-        """Send input to a session."""
+    def send_input(self, session_id: str, text: str, sender_session_id: Optional[str] = None) -> bool:
+        """
+        Send input to a session with optional sender metadata.
+
+        Args:
+            session_id: Target session ID
+            text: Text to send
+            sender_session_id: Optional ID of sending session (for metadata)
+
+        Returns:
+            True if successful
+        """
         session = self.sessions.get(session_id)
         if not session:
             logger.error(f"Session not found: {session_id}")
             return False
 
-        success = self.tmux.send_input(session.tmux_session, text)
+        # Format message with sender metadata if provided
+        if sender_session_id:
+            sender_session = self.sessions.get(sender_session_id)
+            if sender_session:
+                sender_name = sender_session.friendly_name or sender_session.name or sender_session_id
+                formatted_text = f"[Input from: {sender_name} ({sender_session_id[:8]}) via sm send]\n{text}"
+            else:
+                # Sender session not found, send without metadata
+                formatted_text = text
+        else:
+            formatted_text = text
+
+        success = self.tmux.send_input(session.tmux_session, formatted_text)
         if success:
             session.last_activity = datetime.now()
             session.status = SessionStatus.RUNNING
