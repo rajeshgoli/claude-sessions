@@ -741,7 +741,7 @@ def cmd_children(
 def cmd_kill(
     client: SessionManagerClient,
     requester_session_id: Optional[str],
-    target_session_id: str,
+    target_identifier: str,
 ) -> int:
     """
     Kill a child session (with parent-child ownership check).
@@ -749,13 +749,25 @@ def cmd_kill(
     Args:
         client: API client
         requester_session_id: Requesting session ID (must be parent)
-        target_session_id: Target session ID to kill
+        target_identifier: Target session ID or friendly name
 
     Exit codes:
         0: Success
         1: Not authorized or failed
         2: Session manager unavailable
     """
+    # Resolve identifier to session ID and get session details
+    target_session_id, session = resolve_session_id(client, target_identifier)
+    if target_session_id is None:
+        # Check if it's unavailable or not found
+        sessions = client.list_sessions()
+        if sessions is None:
+            print("Error: Session manager unavailable", file=sys.stderr)
+            return 2
+        else:
+            print(f"Error: Session '{target_identifier}' not found", file=sys.stderr)
+            return 1
+
     # Kill session with ownership check
     result = client.kill_session(
         requester_session_id=requester_session_id,
@@ -770,6 +782,7 @@ def cmd_kill(
         print(f"Error: {result['error']}", file=sys.stderr)
         return 1
 
-    # Success
-    print(f"Session {target_session_id} terminated")
+    # Success - show friendly name if available
+    name = session.get("friendly_name") or session.get("name") or target_session_id
+    print(f"Session {name} ({target_session_id}) terminated")
     return 0
