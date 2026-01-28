@@ -154,7 +154,7 @@ def main():
             delivery_mode = "important"
         sys.exit(commands.cmd_send(client, args.session_id, args.text, delivery_mode))
     elif args.command == "spawn":
-        sys.exit(commands.cmd_spawn(client, session_id, args.prompt, args.name, args.wait, args.model, getattr(args, 'working_dir', None), args.json))
+        sys.exit(commands.cmd_spawn(client, session_id, args.prompt, args.name, args.wait, args.model, args.working_dir, args.json))
     elif args.command == "children":
         # Use current session if not specified
         parent_id = args.session_id if args.session_id else session_id
