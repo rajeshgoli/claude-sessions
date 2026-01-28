@@ -266,6 +266,7 @@ class TelegramBot:
             "Commands:\n"
             "/new [path] - Create new session (defaults to fractal-market-simulator)\n"
             "/session - Pick a project and create a session\n"
+            "/follow <session> - Create forum topic for existing session\n"
             "/list - List active sessions\n"
             "/status - What is Claude doing? (reply to session)\n"
             "/subagents - List spawned subagents (reply to session)\n"
@@ -1033,6 +1034,79 @@ Provide ONLY the summary, no preamble or questions."""
             logger.error(f"Error fetching password: {e}")
             await update.message.reply_text(f"Failed to fetch password: {e}")
 
+    async def _cmd_follow(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /follow command to create a forum topic for an existing session."""
+        if not self._is_allowed(update.effective_chat.id, update.effective_user.id):
+            await update.message.reply_text("Unauthorized.")
+            return
+
+        if not context.args:
+            await update.message.reply_text("Usage: /follow <session_id or friendly_name>")
+            return
+
+        if not update.effective_chat.is_forum:
+            await update.message.reply_text("This command only works in forum groups.")
+            return
+
+        identifier = " ".join(context.args)
+        chat_id = update.effective_chat.id
+
+        # Resolve session by ID or friendly name
+        session = None
+
+        # Try as session ID first
+        if self._on_session_status:
+            session = await self._on_session_status(identifier)
+
+        # If not found by ID, try as friendly name
+        if not session and self._on_list_sessions:
+            sessions = await self._on_list_sessions()
+            for s in sessions:
+                if s.friendly_name == identifier:
+                    session = s
+                    break
+
+        if not session:
+            await update.message.reply_text(f"Session not found: {identifier}")
+            return
+
+        # Check if session already has a topic
+        if session.telegram_topic_id:
+            await update.message.reply_text(
+                f"Session [{session.id}] already has a topic (ID: {session.telegram_topic_id})"
+            )
+            return
+
+        # Create forum topic for the session
+        topic_name = f"{session.friendly_name or 'session'} [{session.id}]"
+        topic_id = await self.create_forum_topic(chat_id, topic_name)
+
+        if not topic_id:
+            await update.message.reply_text("Failed to create forum topic.")
+            return
+
+        # Register topic -> session mapping
+        self.register_topic_session(chat_id, topic_id, session.id)
+
+        # Send welcome message in the new topic
+        await self.bot.send_message(
+            chat_id=chat_id,
+            message_thread_id=topic_id,
+            text=f"Now following session: {session.name}\n"
+                 f"ID: {session.id}\n"
+                 f"Directory: {session.working_dir}\n\n"
+                 "Send messages here to interact with Claude."
+        )
+
+        # Update session with topic info
+        if self._on_update_topic:
+            await self._on_update_topic(session.id, chat_id, topic_id)
+
+        await update.message.reply_text(
+            f"Created topic for session [{session.id}]\n"
+            f"You can now interact with it in the new topic."
+        )
+
     async def _handle_new_project(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle project selection button press."""
         query = update.callback_query
@@ -1135,6 +1209,7 @@ Provide ONLY the summary, no preamble or questions."""
         self.application.add_handler(CommandHandler("open", self._cmd_open))
         self.application.add_handler(CommandHandler("name", self._cmd_name))
         self.application.add_handler(CommandHandler("password", self._cmd_password))
+        self.application.add_handler(CommandHandler("follow", self._cmd_follow))
 
         # Handle button presses for project selection
         self.application.add_handler(CallbackQueryHandler(self._handle_new_project, pattern="^new_project:"))

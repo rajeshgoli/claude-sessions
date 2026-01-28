@@ -280,3 +280,22 @@ class SessionManagerClient:
         if unavailable:
             return None
         return data
+
+    def create_session(self, working_dir: str) -> Optional[dict]:
+        """
+        Create a new Claude Code session.
+
+        Args:
+            working_dir: Working directory path
+
+        Returns:
+            Session dict or None if unavailable
+        """
+        import urllib.parse
+        encoded_dir = urllib.parse.quote(working_dir)
+        data, success, unavailable = self._request(
+            "POST",
+            f"/sessions/create?working_dir={encoded_dir}",
+            timeout=10
+        )
+        return data if success else None

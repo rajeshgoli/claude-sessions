@@ -114,7 +114,8 @@ class Session:
         if not self.name:
             self.name = f"claude-{self.id}"
         if not self.tmux_session:
-            self.tmux_session = self.name
+            # IMPORTANT: tmux_session should ALWAYS be claude-{id}, not name
+            self.tmux_session = f"claude-{self.id}"
 
     def to_dict(self) -> dict:
         """Convert session to dictionary for JSON serialization."""

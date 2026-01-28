@@ -17,9 +17,10 @@ def main():
 
     subparsers = parser.add_subparsers(dest="command", help="Command to execute")
 
-    # sm name <friendly-name>
-    name_parser = subparsers.add_parser("name", help="Set friendly name for this session")
-    name_parser.add_argument("friendly_name", help="Friendly name (e.g., 'scout-epic987')")
+    # sm name <friendly-name> OR sm name <session> <friendly-name>
+    name_parser = subparsers.add_parser("name", help="Set friendly name for self or a child session")
+    name_parser.add_argument("name_or_session", help="Name for self, or session identifier to rename a child")
+    name_parser.add_argument("new_name", nargs="?", help="New name when renaming a child session")
 
     # sm me
     subparsers.add_parser("me", help="Show current session info")
@@ -96,12 +97,65 @@ def main():
     kill_parser = subparsers.add_parser("kill", help="Terminate a child session")
     kill_parser.add_argument("session_id", help="Session ID to terminate")
 
+    # sm new [working_dir]
+    parser_new = subparsers.add_parser(
+        "new",
+        help="Create a new Claude Code session and attach to it"
+    )
+    parser_new.add_argument(
+        "working_dir",
+        nargs="?",
+        help="Working directory (defaults to current directory)"
+    )
+
+    # sm attach [session]
+    parser_attach = subparsers.add_parser(
+        "attach",
+        help="Attach to an existing session"
+    )
+    parser_attach.add_argument(
+        "session",
+        nargs="?",
+        help="Session ID or friendly name (shows menu if omitted)"
+    )
+
+    # sm output <session> [--lines N]
+    parser_output = subparsers.add_parser(
+        "output",
+        help="View recent tmux output from a session"
+    )
+    parser_output.add_argument(
+        "session",
+        help="Session ID or friendly name"
+    )
+    parser_output.add_argument(
+        "--lines",
+        type=int,
+        default=30,
+        help="Number of lines to capture (default: 30)"
+    )
+
+    # sm clear <session> [prompt]
+    parser_clear = subparsers.add_parser(
+        "clear",
+        help="Send /clear to reset session context"
+    )
+    parser_clear.add_argument(
+        "session",
+        help="Session ID or friendly name"
+    )
+    parser_clear.add_argument(
+        "prompt",
+        nargs="?",
+        help="Optional new prompt to send after clearing"
+    )
+
     args = parser.parse_args()
 
     # Check for CLAUDE_SESSION_MANAGER_ID
     session_id = os.environ.get("CLAUDE_SESSION_MANAGER_ID")
-    # Commands that don't need session_id: lock, unlock, hooks, all, send, what, subagents, children, kill
-    no_session_needed = ["lock", "unlock", "subagent-start", "subagent-stop", "all", "send", "what", "subagents", "children", "kill", None]
+    # Commands that don't need session_id: lock, unlock, hooks, all, send, what, subagents, children, kill, new, attach, output, clear
+    no_session_needed = ["lock", "unlock", "subagent-start", "subagent-stop", "all", "send", "what", "subagents", "children", "kill", "new", "attach", "output", "clear", None]
     # Commands that require session_id: spawn (needs to set parent_session_id)
     requires_session_id = ["spawn"]
     if not session_id and args.command in requires_session_id:
@@ -118,7 +172,7 @@ def main():
 
     # Dispatch to command handler
     if args.command == "name":
-        sys.exit(commands.cmd_name(client, session_id, args.friendly_name))
+        sys.exit(commands.cmd_name(client, session_id, args.name_or_session, args.new_name))
     elif args.command == "me":
         sys.exit(commands.cmd_me(client, session_id))
     elif args.command == "who":
@@ -161,6 +215,14 @@ def main():
         sys.exit(commands.cmd_children(client, parent_id, args.recursive, args.status, args.json))
     elif args.command == "kill":
         sys.exit(commands.cmd_kill(client, session_id, args.session_id))
+    elif args.command == "new":
+        sys.exit(commands.cmd_new(client, args.working_dir))
+    elif args.command == "attach":
+        sys.exit(commands.cmd_attach(client, args.session))
+    elif args.command == "output":
+        sys.exit(commands.cmd_output(client, args.session, args.lines))
+    elif args.command == "clear":
+        sys.exit(commands.cmd_clear(client, session_id, args.session, args.prompt))
     else:
         parser.print_help()
         sys.exit(0)

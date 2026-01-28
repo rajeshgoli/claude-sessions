@@ -25,9 +25,11 @@ class SessionResponse(BaseModel):
     status: str
     created_at: str
     last_activity: str
+    tmux_session: str
     friendly_name: Optional[str] = None
     current_task: Optional[str] = None
     git_remote_url: Optional[str] = None
+    parent_session_id: Optional[str] = None
 
 
 class SendInputRequest(BaseModel):
@@ -163,10 +165,41 @@ def create_app(
             status=session.status.value,
             created_at=session.created_at.isoformat(),
             last_activity=session.last_activity.isoformat(),
+            tmux_session=session.tmux_session,
             friendly_name=session.friendly_name,
             current_task=session.current_task,
             git_remote_url=session.git_remote_url,
+            parent_session_id=session.parent_session_id,
         )
+
+    @app.post("/sessions/create")
+    async def create_session_endpoint(working_dir: str):
+        """
+        Create a new Claude Code session.
+
+        Args:
+            working_dir: Absolute path to working directory
+
+        Returns:
+            Session object dict
+        """
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        # Create session using config settings
+        session = app.state.session_manager.create_session(
+            working_dir=working_dir,
+            telegram_chat_id=None,  # No Telegram association
+        )
+
+        if not session:
+            raise HTTPException(status_code=500, detail="Failed to create session")
+
+        # Start monitoring (same as Telegram /new does)
+        if app.state.output_monitor:
+            await app.state.output_monitor.start_monitoring(session)
+
+        return session.to_dict()
 
     @app.get("/sessions")
     async def list_sessions():
@@ -185,9 +218,11 @@ def create_app(
                     status=s.status.value,
                     created_at=s.created_at.isoformat(),
                     last_activity=s.last_activity.isoformat(),
+                    tmux_session=s.tmux_session,
                     friendly_name=s.friendly_name,
                     current_task=s.current_task,
                     git_remote_url=s.git_remote_url,
+                    parent_session_id=s.parent_session_id,
                 )
                 for s in sessions
             ]
@@ -211,9 +246,11 @@ def create_app(
             status=session.status.value,
             created_at=session.created_at.isoformat(),
             last_activity=session.last_activity.isoformat(),
+            tmux_session=session.tmux_session,
             friendly_name=session.friendly_name,
             current_task=session.current_task,
             git_remote_url=session.git_remote_url,
+            parent_session_id=session.parent_session_id,
         )
 
     @app.patch("/sessions/{session_id}", response_model=SessionResponse)
@@ -242,9 +279,11 @@ def create_app(
             status=session.status.value,
             created_at=session.created_at.isoformat(),
             last_activity=session.last_activity.isoformat(),
+            tmux_session=session.tmux_session,
             friendly_name=session.friendly_name,
             current_task=session.current_task,
             git_remote_url=session.git_remote_url,
+            parent_session_id=session.parent_session_id,
         )
 
     @app.put("/sessions/{session_id}/task")

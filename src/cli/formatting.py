@@ -48,7 +48,8 @@ def format_session_line(
     session: dict,
     show_working_dir: bool = False,
     show_summary: bool = False,
-    summary: Optional[str] = None
+    summary: Optional[str] = None,
+    index: Optional[int] = None
 ) -> str:
     """
     Format a session as a single line.
@@ -58,28 +59,45 @@ def format_session_line(
         show_working_dir: Show working directory instead of relative time
         show_summary: Show summary on next line
         summary: Optional summary text
+        index: Optional menu index number
 
     Returns:
         Formatted session line(s)
     """
     # Get display name (friendly_name or just ID)
     friendly_name = session.get("friendly_name")
-    session_id = session["id"]
-    status = session["status"]
+    name = session.get("name", session.get("id", "unknown"))
+    session_id = session.get("id", "unknown")
+    status = session.get("status", "unknown")
+    last_activity = session.get("last_activity")
 
-    if friendly_name:
-        name_part = f"{friendly_name} ({session_id})"
+    # Display name: prefer friendly_name, fall back to name
+    display_name = friendly_name or name
+
+    # Format last activity
+    if last_activity:
+        time_str = format_relative_time(last_activity)
     else:
-        name_part = session_id
+        time_str = "unknown"
 
-    # Get time or working dir
+    # Build line
+    parts = []
+
+    if index is not None:
+        parts.append(f"{index}.")
+
+    parts.append(display_name)
+    parts.append(f"[{session_id}]")
+    parts.append(f"- {status}")
+    parts.append(f"- {time_str}")
+
     if show_working_dir:
-        location = session["working_dir"]
-    else:
-        location = format_relative_time(session["last_activity"])
+        working_dir = session.get("working_dir", "")
+        if working_dir:
+            parts.append(f"({working_dir})")
 
     # Format main line
-    line = f"{name_part} | {status:20s} | {location}"
+    line = " ".join(parts)
 
     # Add summary if requested
     if show_summary and summary:

@@ -202,13 +202,11 @@ class SessionManager:
             spawned_at=datetime.now(),
         )
 
-        # Generate session name
+        # Generate session name (tmux_session is auto-set by __post_init__)
         if name:
             session.name = name
-            session.tmux_session = f"claude-{name}"
         else:
             session.name = f"child-{session.id}"
-            session.tmux_session = f"claude-{session.id}"
 
         # Set up log file path
         session.log_file = str(self.log_dir / f"{session.name}.log")

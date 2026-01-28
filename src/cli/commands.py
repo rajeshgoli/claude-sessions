@@ -37,19 +37,65 @@ def resolve_session_id(client: SessionManagerClient, identifier: str) -> tuple[O
     return None, None  # Not found
 
 
-def cmd_name(client: SessionManagerClient, session_id: str, friendly_name: str) -> int:
+def cmd_name(client: SessionManagerClient, session_id: str, name_or_session: str, new_name: Optional[str] = None) -> int:
     """
-    Set friendly name for current session.
+    Set friendly name for current session or a child session.
+
+    Args:
+        client: API client
+        session_id: Current session ID
+        name_or_session: Name for self, or session identifier when renaming a child
+        new_name: New name when renaming a child session (None when renaming self)
 
     Exit codes:
         0: Success
-        1: Failed to set
+        1: Failed to set or not authorized
         2: Session manager unavailable
     """
-    success, unavailable = client.update_friendly_name(session_id, friendly_name)
+    # Case 1: Rename self (sm name <name>)
+    if new_name is None:
+        friendly_name = name_or_session
+        success, unavailable = client.update_friendly_name(session_id, friendly_name)
+
+        if success:
+            print(f"Name set: {friendly_name} ({session_id})")
+            return 0
+        elif unavailable:
+            print("Error: Session manager unavailable", file=sys.stderr)
+            return 2
+        else:
+            print("Error: Failed to set name", file=sys.stderr)
+            return 1
+
+    # Case 2: Rename child session (sm name <session> <name>)
+    target_identifier = name_or_session
+    friendly_name = new_name
+
+    # Resolve identifier to session ID and get session details
+    target_session_id, target_session = resolve_session_id(client, target_identifier)
+    if target_session_id is None:
+        # Check if it's unavailable or not found
+        sessions = client.list_sessions()
+        if sessions is None:
+            print("Error: Session manager unavailable", file=sys.stderr)
+            return 2
+        else:
+            print(f"Error: Session '{target_identifier}' not found", file=sys.stderr)
+            return 1
+
+    # Check parent-child ownership
+    # Only allow renaming if current session is the parent of the target session
+    parent_id = target_session.get("parent_session_id")
+    if parent_id != session_id:
+        print(f"Error: Not authorized. You can only rename your child sessions.", file=sys.stderr)
+        print(f"Target session parent: {parent_id or 'none'}", file=sys.stderr)
+        return 1
+
+    # Update the child session's friendly name
+    success, unavailable = client.update_friendly_name(target_session_id, friendly_name)
 
     if success:
-        print(f"Name set: {friendly_name} ({session_id})")
+        print(f"Name set: {friendly_name} ({target_session_id})")
         return 0
     elif unavailable:
         print("Error: Session manager unavailable", file=sys.stderr)
@@ -109,7 +155,7 @@ def cmd_who(client: SessionManagerClient, session_id: str) -> int:
         s for s in sessions
         if s["id"] != session_id
         and s["working_dir"] == working_dir
-        and s["status"] in ["running", "waiting_permission"]
+        and s["status"] in ["running", "waiting_permission", "idle"]
     ]
 
     if not others:
@@ -203,14 +249,14 @@ def cmd_others(client: SessionManagerClient, session_id: str, include_repo: bool
                 s for s in sessions
                 if s["id"] != session_id
                 and s["working_dir"] == current["working_dir"]
-                and s["status"] in ["running", "waiting_permission"]
+                and s["status"] in ["running", "waiting_permission", "idle"]
             ]
         else:
             others = [
                 s for s in sessions
                 if s["id"] != session_id
                 and s.get("git_remote_url") == git_remote
-                and s["status"] in ["running", "waiting_permission"]
+                and s["status"] in ["running", "waiting_permission", "idle"]
             ]
     else:
         # Match by working_dir (same workspace)
@@ -219,7 +265,7 @@ def cmd_others(client: SessionManagerClient, session_id: str, include_repo: bool
             s for s in sessions
             if s["id"] != session_id
             and s["working_dir"] == working_dir
-            and s["status"] in ["running", "waiting_permission"]
+            and s["status"] in ["running", "waiting_permission", "idle"]
         ]
 
     if not others:
@@ -295,7 +341,7 @@ def cmd_alone(client: SessionManagerClient, session_id: str) -> int:
         s for s in sessions
         if s["id"] != session_id
         and s["working_dir"] == working_dir
-        and s["status"] in ["running", "waiting_permission"]
+        and s["status"] in ["running", "waiting_permission", "idle"]
     ]
 
     return 0 if not others else 1
@@ -792,3 +838,353 @@ def cmd_kill(
     name = session.get("friendly_name") or session.get("name") or target_session_id
     print(f"Session {name} ({target_session_id}) terminated")
     return 0
+
+
+def cmd_new(client: SessionManagerClient, working_dir: Optional[str] = None) -> int:
+    """
+    Create a new Claude Code session and attach to it.
+
+    Args:
+        client: API client
+        working_dir: Working directory (optional, defaults to $PWD)
+
+    Exit codes:
+        0: Successfully created and attached
+        1: Failed to create session
+        2: Session manager unavailable
+    """
+    import os
+    import subprocess
+    import time
+    from pathlib import Path
+
+    # Resolve working directory
+    if working_dir is None:
+        working_dir = os.getcwd()
+
+    # Expand and resolve path
+    try:
+        path = Path(working_dir).expanduser().resolve()
+        if not path.exists():
+            print(f"Error: Directory does not exist: {working_dir}", file=sys.stderr)
+            return 1
+        if not path.is_dir():
+            print(f"Error: Not a directory: {working_dir}", file=sys.stderr)
+            return 1
+        working_dir = str(path)
+    except Exception as e:
+        print(f"Error: Invalid path: {e}", file=sys.stderr)
+        return 1
+
+    # Create session via API
+    print(f"Creating session in {working_dir}...")
+    session = client.create_session(working_dir)
+
+    if session is None:
+        print("Error: Session manager unavailable", file=sys.stderr)
+        return 2
+
+    # Extract tmux session name
+    tmux_session = session.get("tmux_session")
+    session_id = session.get("id")
+
+    if not tmux_session:
+        print("Error: Failed to get tmux session name", file=sys.stderr)
+        return 1
+
+    print(f"Session created: {session_id}")
+    print(f"Attaching to {tmux_session}...")
+
+    # Wait briefly for Claude to initialize
+    time.sleep(1)
+
+    # Attach to tmux session (blocks until detach)
+    try:
+        subprocess.run(["tmux", "attach", "-t", tmux_session], check=True)
+        return 0
+    except subprocess.CalledProcessError:
+        print(f"Error: Failed to attach to tmux session {tmux_session}", file=sys.stderr)
+        return 1
+    except FileNotFoundError:
+        print("Error: tmux not found. Is tmux installed?", file=sys.stderr)
+        return 1
+
+
+def cmd_attach(client: SessionManagerClient, identifier: Optional[str] = None) -> int:
+    """
+    Attach to an existing Claude Code session.
+
+    Args:
+        client: API client
+        identifier: Session ID or friendly name (optional, shows menu if omitted)
+
+    Exit codes:
+        0: Successfully attached
+        1: No sessions available or invalid selection
+        2: Session manager unavailable
+    """
+    import subprocess
+
+    # Case 1: Direct attach with identifier
+    if identifier:
+        # Resolve identifier to session
+        session_id, session = resolve_session_id(client, identifier)
+
+        if session_id is None:
+            sessions = client.list_sessions()
+            if sessions is None:
+                print("Error: Session manager unavailable", file=sys.stderr)
+                return 2
+            else:
+                print(f"Error: Session '{identifier}' not found", file=sys.stderr)
+                return 1
+
+        # Extract tmux session name
+        tmux_session = session.get("tmux_session")
+        if not tmux_session:
+            print("Error: Session has no tmux session", file=sys.stderr)
+            return 1
+
+        # Attach
+        try:
+            subprocess.run(["tmux", "attach", "-t", tmux_session], check=True)
+            return 0
+        except subprocess.CalledProcessError:
+            print(f"Error: Failed to attach to tmux session {tmux_session}", file=sys.stderr)
+            return 1
+        except FileNotFoundError:
+            print("Error: tmux not found. Is tmux installed?", file=sys.stderr)
+            return 1
+
+    # Case 2: Interactive menu
+    sessions = client.list_sessions()
+
+    if sessions is None:
+        print("Error: Session manager unavailable", file=sys.stderr)
+        return 2
+
+    # Filter out stopped sessions only (error status is still attachable)
+    active_sessions = [
+        s for s in sessions
+        if s.get("status") != "stopped"
+    ]
+
+    if not active_sessions:
+        print("No sessions available")
+        return 1
+
+    # Single session - attach directly
+    if len(active_sessions) == 1:
+        session = active_sessions[0]
+        tmux_session = session.get("tmux_session")
+
+        try:
+            subprocess.run(["tmux", "attach", "-t", tmux_session], check=True)
+            return 0
+        except subprocess.CalledProcessError:
+            print(f"Error: Failed to attach to tmux session {tmux_session}", file=sys.stderr)
+            return 1
+
+    # Multiple sessions - show menu
+    print("Available sessions:")
+    for i, session in enumerate(active_sessions, start=1):
+        print(format_session_line(session, index=i))
+
+    print()
+
+    # Get user selection
+    try:
+        selection = input("Select session (number or name): ").strip()
+    except KeyboardInterrupt:
+        print("\nCancelled")
+        return 1
+    except EOFError:
+        print("\nCancelled")
+        return 1
+
+    if not selection:
+        print("No selection made")
+        return 1
+
+    # Try as number first
+    if selection.isdigit():
+        index = int(selection)
+        if index < 1 or index > len(active_sessions):
+            print(f"Error: Invalid selection. Must be between 1 and {len(active_sessions)}", file=sys.stderr)
+            return 1
+        session = active_sessions[index - 1]
+    else:
+        # Try as session ID or friendly name
+        session_id, session = resolve_session_id(client, selection)
+        if session_id is None:
+            print(f"Error: Session '{selection}' not found", file=sys.stderr)
+            return 1
+
+    # Attach to selected session
+    tmux_session = session.get("tmux_session")
+    if not tmux_session:
+        print("Error: Session has no tmux session", file=sys.stderr)
+        return 1
+
+    try:
+        subprocess.run(["tmux", "attach", "-t", tmux_session], check=True)
+        return 0
+    except subprocess.CalledProcessError:
+        print(f"Error: Failed to attach to tmux session {tmux_session}", file=sys.stderr)
+        return 1
+    except FileNotFoundError:
+        print("Error: tmux not found. Is tmux installed?", file=sys.stderr)
+        return 1
+
+
+def cmd_output(client: SessionManagerClient, identifier: str, lines: int) -> int:
+    """
+    Show recent tmux output from a session.
+
+    Args:
+        client: API client
+        identifier: Session ID or friendly name
+        lines: Number of lines to capture
+
+    Exit codes:
+        0: Success
+        1: Session not found or no tmux session
+        2: Session manager unavailable
+    """
+    from ..tmux_controller import TmuxController
+
+    # Resolve identifier to session ID and get session details
+    session_id, session = resolve_session_id(client, identifier)
+    if session_id is None:
+        # Check if it's unavailable or not found
+        sessions = client.list_sessions()
+        if sessions is None:
+            print("Error: Session manager unavailable", file=sys.stderr)
+            return 2
+        else:
+            print(f"Error: Session '{identifier}' not found", file=sys.stderr)
+            return 1
+
+    # Extract tmux session name
+    tmux_session = session.get("tmux_session")
+    if not tmux_session:
+        print(f"Error: Session has no tmux session", file=sys.stderr)
+        return 1
+
+    # Capture pane output
+    tmux_controller = TmuxController()
+    output = tmux_controller.capture_pane(tmux_session, lines=lines)
+
+    if output is None:
+        print(f"Error: Failed to capture output from {tmux_session}", file=sys.stderr)
+        return 1
+
+    # Print output
+    print(output, end="")
+    return 0
+
+
+def cmd_clear(
+    client: SessionManagerClient,
+    requester_session_id: Optional[str],
+    target_identifier: str,
+    new_prompt: Optional[str] = None,
+) -> int:
+    """
+    Send /clear to a child Claude Code session to reset its context.
+    Requires parent-child ownership (requester must be parent of target).
+
+    Args:
+        client: API client
+        requester_session_id: Requesting session ID (must be parent)
+        target_identifier: Target session ID or friendly name
+        new_prompt: Optional prompt to send after clearing
+
+    Exit codes:
+        0: Success
+        1: Not authorized or clear failed
+        2: Session manager unavailable
+    """
+    import subprocess
+    import time
+
+    # Resolve identifier to session ID and get session details
+    target_session_id, session = resolve_session_id(client, target_identifier)
+    if target_session_id is None:
+        # Check if it's unavailable or not found
+        sessions = client.list_sessions()
+        if sessions is None:
+            print("Error: Session manager unavailable", file=sys.stderr)
+            return 2
+        else:
+            print(f"Error: Session '{target_identifier}' not found", file=sys.stderr)
+            return 1
+
+    # Check parent-child ownership
+    # Only allow clearing if:
+    # 1. Requester is the parent of the target session
+    # 2. Or requester is None (called from outside a session, like from shell)
+    parent_id = session.get("parent_session_id")
+
+    if requester_session_id is not None:
+        # Called from within a session - must be parent
+        if parent_id != requester_session_id:
+            print(f"Error: Not authorized. You can only clear your child sessions.", file=sys.stderr)
+            print(f"Target session parent: {parent_id or 'none'}", file=sys.stderr)
+            return 1
+    else:
+        # Called from shell (no CLAUDE_SESSION_MANAGER_ID)
+        # Only allow if target is a child session (has a parent)
+        if parent_id is None:
+            print(f"Error: Can only clear child sessions. Target session has no parent.", file=sys.stderr)
+            return 1
+
+    # Extract tmux session name
+    tmux_session = session.get("tmux_session")
+    if not tmux_session:
+        print(f"Error: Session {target_session_id} has no tmux session", file=sys.stderr)
+        return 1
+
+    # Send /clear command
+    try:
+        import shlex
+
+        # First, send ESC to interrupt any ongoing stream
+        subprocess.run(
+            ["tmux", "send-keys", "-t", tmux_session, "Escape"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        # Wait for interrupt to process
+        time.sleep(0.5)
+
+        # Now send /clear using the same approach as send_input
+        cmd = f'tmux send-keys -t {tmux_session} "/clear" && sleep 1 && tmux send-keys -t {tmux_session} Enter'
+        subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+
+        # Wait for clear to process
+        time.sleep(2)
+
+        # Send new prompt if provided
+        if new_prompt:
+            import shlex
+            escaped_text = shlex.quote(new_prompt)
+            cmd = f'tmux send-keys -t {tmux_session} {escaped_text} && sleep 1 && tmux send-keys -t {tmux_session} Enter'
+            subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+
+            name = session.get("friendly_name") or session.get("name") or target_session_id
+            print(f"Cleared {name} ({target_session_id}) and sent new prompt")
+        else:
+            name = session.get("friendly_name") or session.get("name") or target_session_id
+            print(f"Cleared {name} ({target_session_id})")
+
+        return 0
+
+    except subprocess.CalledProcessError as e:
+        print(f"Error: Failed to send clear command: {e.stderr}", file=sys.stderr)
+        return 1
+    except FileNotFoundError:
+        print("Error: tmux not found. Is tmux installed?", file=sys.stderr)
+        return 1

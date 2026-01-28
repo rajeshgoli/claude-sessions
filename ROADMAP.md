@@ -2,6 +2,61 @@
 
 ## Recent Work (2026-01-27)
 
+### Session 5: CLI Enhancements & Agent Workflow Improvements
+
+**What was completed:**
+
+1. **sm new & sm attach Commands** (Issue: specs/sm-new-and-attach.md)
+   - `sm new [working_dir]` - Create session and auto-attach (uses config for claude args)
+   - `sm attach [session]` - Interactive menu or direct attach by ID/name
+   - Uses `claude` config section for command, args, default model
+   - Automatically sets `ENABLE_TOOL_SEARCH=false` (Claude Code bug workaround)
+
+2. **sm clear Command** (Issue #21)
+   - `sm clear <session> [prompt]` - Reset child agent context for task reuse
+   - Sends ESC to interrupt + /clear to reset context
+   - Optional new prompt after clearing
+   - Parent-child ownership check
+
+3. **sm output Command** (Issue #23)
+   - `sm output <session> [--lines N]` - View recent tmux output
+   - Resolves by ID or friendly name
+   - Uses existing tmux_controller.capture_pane()
+   - Default 30 lines, configurable
+
+4. **sm name Enhancement** (Issue #24)
+   - `sm name <name>` - Rename self (existing)
+   - `sm name <session> <name>` - Rename child session (new)
+   - Parent-child ownership check
+
+5. **/follow Command for Telegram** (Issue #22)
+   - `/follow <session>` - Associate existing session with Telegram topic
+   - Creates forum topic for sessions created via sm spawn/new
+   - Enables Telegram notifications for CLI-created sessions
+
+6. **Bug Fixes**
+   - #18: tmux session naming - Always use `claude-{session_id}` not friendly name
+   - #19: sm spawn prompt submission - Increased init wait to 3s
+   - #20: sm status excludes idle sessions - Added "idle" to status filter
+   - sm attach excluding "error" status - Now shows all non-stopped sessions
+
+7. **Workaround: Claude Code ToolSearch Bug**
+   - Added `export ENABLE_TOOL_SEARCH=false` to all new sessions
+   - References upstream issues #20329, #20468, #20982
+   - Prevents infinite recursion/stack overflow in Claude Code
+
+**Agent Workflow Demonstrated:**
+- Spawned child agents to implement features
+- Used `sm clear` to reuse agents for multiple issues
+- Used `sm output` to monitor agent progress
+- Used `sm name` to rename agents mid-session
+
+**Files Changed:** 11 files, +600 lines
+
+**Issues Filed:** #18, #19, #20, #21, #22, #23, #24
+
+---
+
 ### Session 4: Multi-Agent Coordination Phase 1 MVP
 
 **What was completed:**
@@ -326,6 +381,14 @@
   - Parent-child session hierarchy with full lifecycle tracking
   - MessageQueueManager for sequential delivery mode
   - ChildMonitor for automatic completion detection
+- ✅ **CLI Enhancements** (Session 5)
+  - sm new: Create session and auto-attach to tmux
+  - sm attach: Interactive menu or direct attach by ID/name
+  - sm clear: Reset child agent context for task reuse
+  - sm output: View recent tmux output from any session
+  - sm name: Rename child sessions (not just self)
+  - /follow: Associate Telegram topics with existing sessions
+  - ToolSearch bug workaround (ENABLE_TOOL_SEARCH=false)
 
 ---
 

@@ -108,7 +108,15 @@ class TmuxController:
                 f"cat >> {log_file}",
             )
 
-            # Set up environment variable first (persists in the shell)
+            # Set up environment variables first (persists in the shell)
+            # Workaround for Claude Code bug: ToolSearch infinite loop (issues #20329, #20468, #20982)
+            self._run_tmux(
+                "send-keys",
+                "-t", session_name,
+                "export ENABLE_TOOL_SEARCH=false",
+                "Enter",
+            )
+
             if session_id:
                 # Export session ID so it persists even if user exits and restarts Claude
                 self._run_tmux(
@@ -117,9 +125,10 @@ class TmuxController:
                     f"export CLAUDE_SESSION_MANAGER_ID={session_id}",
                     "Enter",
                 )
-                # Small delay to ensure export completes
-                import time
-                time.sleep(0.1)
+
+            # Small delay to ensure exports complete
+            import time
+            time.sleep(0.1)
 
             # Start Claude Code in the session
             self._run_tmux(
@@ -193,7 +202,15 @@ class TmuxController:
                 f"cat >> {log_file}",
             )
 
-            # Set up environment variable first (persists in the shell)
+            # Set up environment variables first (persists in the shell)
+            # Workaround for Claude Code bug: ToolSearch infinite loop (issues #20329, #20468, #20982)
+            self._run_tmux(
+                "send-keys",
+                "-t", session_name,
+                "export ENABLE_TOOL_SEARCH=false",
+                "Enter",
+            )
+
             if session_id:
                 # Export session ID so it persists
                 self._run_tmux(
@@ -202,9 +219,10 @@ class TmuxController:
                     f"export CLAUDE_SESSION_MANAGER_ID={session_id}",
                     "Enter",
                 )
-                # Small delay to ensure export completes
-                import time
-                time.sleep(0.1)
+
+            # Small delay to ensure exports complete
+            import time
+            time.sleep(0.1)
 
             # Build Claude command with args and model
             cmd_parts = [command]
@@ -222,20 +240,22 @@ class TmuxController:
                 "Enter",
             )
 
-            # Wait for Claude to start
-            import time
-            time.sleep(1)
-
             # Send initial prompt if provided
             if initial_prompt:
-                # Give Claude time to initialize
-                time.sleep(0.5)
+                # Wait longer for Claude to fully initialize and be ready to accept input
+                # Claude Code can take 2-3 seconds to start up and show the prompt
+                import time
+                time.sleep(3)
                 # Send the prompt using same method as send_input()
                 import shlex
                 escaped_text = shlex.quote(initial_prompt)
                 cmd = f'tmux send-keys -t {session_name} {escaped_text} && sleep 1 && tmux send-keys -t {session_name} Enter'
                 subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
                 logger.info(f"Sent initial prompt to {session_name}: {initial_prompt[:50]}...")
+            else:
+                # Still wait for Claude to start even without initial prompt
+                import time
+                time.sleep(1)
 
             logger.info(f"Created child session {session_name} (id={session_id}) with command {' '.join(cmd_parts)}")
             return True
