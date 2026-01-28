@@ -136,12 +136,19 @@ class SessionManager:
         # Set up log file path
         session.log_file = str(self.log_dir / f"{session.name}.log")
 
-        # Create the tmux session (pass session ID so Claude hooks can identify it)
-        if not self.tmux.create_session(
+        # Get Claude config (same as spawn_child_session)
+        claude_config = self.config.get("claude", {})
+        claude_command = claude_config.get("command", "claude")
+        claude_args = claude_config.get("args", [])
+
+        # Create the tmux session with config args
+        if not self.tmux.create_session_with_command(
             session.tmux_session,
             working_dir,
             session.log_file,
             session_id=session.id,
+            command=claude_command,
+            args=claude_args,
         ):
             logger.error(f"Failed to create tmux session for {session.name}")
             return None
