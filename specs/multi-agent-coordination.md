@@ -55,20 +55,10 @@ class Session:
     spawned_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
 
-    # Progress tracking
+    # Progress tracking (auto-detected from transcript)
     tokens_used: int = 0
     tools_used: dict[str, int] = field(default_factory=dict)  # {"Read": 5, "Write": 3}
-    checkpoints: list[Checkpoint] = field(default_factory=list)
-```
-
-#### Checkpoint Model
-```python
-@dataclass
-class Checkpoint:
-    """Progress milestone reported by agent."""
-    timestamp: datetime
-    message: str
-    metadata: Optional[dict] = None  # tokens_at_checkpoint, etc.
+    last_tool_call: Optional[datetime] = None
 ```
 
 #### SessionEvent Model
@@ -84,6 +74,15 @@ class SessionEvent:
 ```
 
 ## Commands
+
+**Essential commands for parent agents:**
+
+1. **`sm spawn "<prompt>" --wait N`** - Spawn child and get notified when done/idle
+2. **`sm what <id>`** - Check status (rarely needed - for fire-and-forget spawns)
+3. **`sm children`** - List all children (optional)
+4. **`sm send <id> "text"`** - Send input to child (optional)
+
+**No special commands needed for child agents** - session manager auto-detects completion, progress, and errors by monitoring the tmux transcript.
 
 ### `sm spawn` - Create Child Agent
 
@@ -200,34 +199,7 @@ Rarely needed - typically use `sm spawn --wait` which notifies parent automatica
 - Investigating why child hasn't completed
 - Manual debugging
 
-### `sm complete` - Signal Completion (Optional)
-
-**Syntax:**
-```bash
-sm complete ["<message>"] [--status <status>]
-```
-
-**Options:**
-- `message`: Completion message/summary sent to parent
-- `--status`: completed (default), error, abandoned
-
-**Example:**
-```bash
-# In child agent (optional - auto-detection also works)
-$ sm complete "Feature X implemented successfully. All 26 tests passing."
-Session marked complete. Parent notified.
-
-$ sm complete "Unable to proceed without API keys" --status error
-Session marked as error. Parent notified.
-```
-
-**Note:** Child agents can optionally call `sm complete` to explicitly signal completion. However, session manager also auto-detects completion based on:
-- Idle timeout (configured in `--wait` or config.yaml)
-- Common completion patterns in transcript
-
-Explicit `sm complete` is useful when you want to provide a detailed completion message to the parent.
-
-### `sm send` - Send Input to Child Session
+### `sm send` - Send Input to Child Session (Optional)
 
 **Syntax:**
 ```bash
@@ -240,6 +212,52 @@ sm send <session-id> "<text>"
 $ sm send def456 "Add error handling for network failures"
 Input sent to session def456
 ```
+
+**Use Case:**
+Rarely needed. Useful for:
+- Answering child's questions
+- Providing additional context mid-task
+- Course-correcting a stuck child
+
+## Auto-Detection
+
+**Session manager automatically detects everything by monitoring the child's tmux session transcript. No special commands needed from child agents.**
+
+### Completion Detection
+
+Session manager marks a child as completed when:
+
+1. **Idle timeout reached** (from `--wait N` parameter)
+   - No tool calls for N seconds
+   - Extracts last message from transcript as completion summary
+
+2. **Completion patterns detected** in transcript:
+   - "Done", "Complete", "Finished"
+   - "All tests passing", "Tests pass"
+   - "PR merged", "Committed and pushed"
+   - Session exits cleanly
+
+3. **Error patterns detected** in transcript:
+   - "Error:", "Failed:", "Cannot proceed"
+   - Exceptions, stack traces
+   - Session crashes
+
+**Parent notification:**
+When any completion condition triggers, session manager sends message to parent's Claude input:
+```
+Child child-abc123 completed: Feature X implemented. PR #1042 created. All tests passing.
+```
+
+### Progress Tracking
+
+Session manager auto-tracks from transcript:
+
+- **Tool usage**: Count Read, Write, Edit, Bash, etc. calls
+- **Last activity**: Time since last tool call
+- **Tokens used**: Approximate from transcript length
+- **Current status**: Extract from latest AI response
+
+No special commands needed - all extracted automatically.
 
 ## Workflow Patterns
 
@@ -363,18 +381,17 @@ child_agents:
     auto_archive_transcript: true     # Save transcript on completion
     archive_path: "/tmp/claude-sessions/archives"
 
-  # Parent notifications
+  # Parent notifications (via sending text to parent's Claude input)
   notifications:
     notify_parent_on_complete: true
     notify_parent_on_error: true
-    notify_parent_on_idle: true
-    notify_parent_on_checkpoint: false  # Too noisy
+    notify_parent_on_idle: true  # When --wait timeout reached
 
-  # Progress tracking
+  # Progress tracking (auto-detected from transcript)
   progress:
-    enable_token_tracking: true
-    enable_tool_tracking: true
-    snapshot_interval: 30  # Seconds between progress snapshots
+    enable_token_tracking: true     # Approximate from transcript length
+    enable_tool_tracking: true      # Count tool calls in transcript
+    snapshot_interval: 30           # Seconds between checks
 
 # Session Manager integration
 sessions:
@@ -462,75 +479,23 @@ Terminal States:
 - Parent session ends without cleanup
 - OR: Parent-child relationship broken
 
-### Lifecycle Modes
+### Lifecycle Behavior
 
-#### Auto Mode (Recommended)
-
-**Behavior:**
-- Automatically detects completion via patterns and idle timeout
-- Notifies parent on state changes
-- Optionally archives transcript and cleans up
-
-**Configuration:**
-```yaml
-child_agents:
-  mode: "auto"
-  auto_complete:
-    enabled: true
-    idle_timeout: 600
-    detect_completion_phrases: true
-```
+**Auto-detection (always enabled):**
+- Session manager monitors child's tmux transcript
+- Detects completion via idle timeout (specified in `--wait N`)
+- Extracts completion summary from last transcript messages
+- Notifies parent by sending message to parent's Claude input
+- Archives transcript (optional, configurable)
+- Keeps tmux session alive for debugging (configurable)
 
 **Example Flow:**
-1. Child completes work, Claude says "Done. All tests passing."
-2. Session Manager detects completion phrase
-3. Marks session as completed
-4. Notifies parent: "Child abc123 completed"
-5. Archives transcript (optional)
-6. Keeps tmux session (configurable)
-
-#### Manual Mode
-
-**Behavior:**
-- Parent must explicitly manage lifecycle
-- No auto-detection or cleanup
-- Sessions persist until explicitly killed
-
-**Configuration:**
-```yaml
-child_agents:
-  mode: "manual"
-  auto_complete:
-    enabled: false
-```
-
-**Example Flow:**
-1. Parent spawns child
-2. Parent periodically checks `sm progress`
-3. When satisfied, parent runs `sm kill <id>`
-4. Parent manages all cleanup
-
-#### Supervised Mode
-
-**Behavior:**
-- Auto-detection enabled
-- Requires parent approval before termination
-- Session Manager prompts parent for decisions
-
-**Configuration:**
-```yaml
-child_agents:
-  mode: "supervised"
-  auto_complete:
-    enabled: true
-    require_parent_approval: true
-```
-
-**Example Flow:**
-1. Child appears complete (idle + completion phrase)
-2. Session Manager notifies parent: "Child abc123 appears complete. Approve termination?"
-3. Parent confirms: `sm approve abc123` or `sm reject abc123`
-4. Session terminated or continues
+1. Parent spawns: `sm spawn "Task" --wait 600`
+2. Child works for 5 minutes, then goes idle
+3. Session manager waits 600 seconds (10 min) of idle
+4. Extracts last messages from transcript: "Feature X done. All tests passing."
+5. Sends to parent's Claude input: "Child child-abc123 completed: Feature X done. All tests passing."
+6. Parent wakes up and continues with completion info in context
 
 ### Termination Handling
 
@@ -558,25 +523,23 @@ cleanup:
 
 ## Progress Monitoring
 
-### Data Sources
+### Data Sources (All Auto-Detected)
 
 **1. Transcript Analysis**
 - Parse `.jsonl` transcript for tool uses
 - Count tokens from Claude responses
-- Extract completion signals
+- Extract completion signals from last messages
+- Detect error patterns
 
 **2. Session Status**
 - Current state: running, idle, waiting_input
-- Last activity timestamp
-- Error messages
+- Last activity timestamp (time since last tool call)
+- Error messages from transcript
 
 **3. tmux Output**
 - Recent output (last 50 lines)
 - Current activity indicators
-
-**4. Explicit Checkpoints**
-- Agent-reported milestones
-- Structured progress updates
+- Detect if session crashed or exited
 
 ### Progress Metrics
 
@@ -667,22 +630,12 @@ sm send def456 "Status update?"
 
 ### Child → Parent
 
-**Checkpoints:**
-```bash
-sm checkpoint "Phase 1 complete"
-```
+**No commands needed** - session manager auto-detects completion by monitoring transcript and sends notification to parent's Claude input.
 
-**Completion:**
-```bash
-sm complete "Task done. All tests passing."
-```
-
-**Questions:**
-```bash
-# Child uses AskUserQuestion tool
-# Parent receives notification
-# Parent responds via sm send
-```
+**If child needs to ask parent a question:**
+- Child uses Claude's AskUserQuestion tool (blocks child, notifies user)
+- User can relay answer via `sm send <child-id> "answer"`
+- Or user answers directly if monitoring child session
 
 ### Shared Context
 
@@ -762,41 +715,30 @@ sm status          # Shows full status including children
 - Manual lifecycle management
 - Parent-child tracking
 
-### Phase 2: Progress Monitoring
-- [ ] Transcript parsing for tokens/tools
-- [ ] `sm progress` command
-- [ ] `sm checkpoint` command
-- [ ] `sm checkpoints` command
-- [ ] Progress metrics API
+### Phase 2: Auto-Detection & Monitoring
+- [ ] Transcript parsing for tool usage tracking
+- [ ] Token estimation from transcript length
+- [ ] Idle detection (time since last tool call)
+- [ ] Completion detection from transcript patterns
+- [ ] Parent notification via input injection
+- [ ] Enhanced `sm what` with progress details
 
 **Deliverables:**
-- Real-time progress visibility
-- Token and tool usage tracking
-- Milestone reporting
+- Automatic completion detection and notification
+- Progress visibility via transcript parsing
+- Zero child-side commands needed
 
-### Phase 3: Auto Lifecycle
-- [ ] Completion detection heuristics
-- [ ] Auto mode implementation
-- [ ] Parent notifications
-- [ ] `sm complete` command
-- [ ] Event system
-
-**Deliverables:**
-- Automatic completion detection
-- Parent event notifications
-- Clean lifecycle management
-
-### Phase 4: Advanced Features
-- [ ] Supervised mode
-- [ ] Progress estimation
-- [ ] Anomaly detection
-- [ ] `sm events --follow` (streaming)
-- [ ] Telegram integration enhancements
+### Phase 3: Polish & Integration
+- [ ] Transcript archiving on completion
+- [ ] Telegram notifications for child events
+- [ ] Better error handling and recovery
+- [ ] Session crash detection
+- [ ] Resource cleanup options
 
 **Deliverables:**
-- Supervised lifecycle
-- Predictive completion
-- Alert system
+- Production-ready reliability
+- Full Telegram integration
+- Clean session lifecycle
 
 ## Open Questions
 
@@ -855,34 +797,36 @@ Spawned engineer-eng-1042 (abc123)
 $ sm spawn Engineer "Implement #1043: SignalResolver" --name eng-1043
 Spawned engineer-eng-1043 (def456)
 
-# Check progress
-$ sm children 1749a2fe
-engineer-eng-1042 (abc123) | running | 2min ago
-engineer-eng-1043 (def456) | running | 1min ago
+# EM spawns engineer and waits (typical pattern)
+$ sm spawn "As engineer, implement ticket #1042 per spec" --wait 600 --name eng-1042
+Spawned child-abc123 (abc123)
+[Waiting... parent not burning tokens...]
 
-# Monitor detailed progress
-$ sm progress abc123
-engineer-eng-1042 (abc123) | working | 5min elapsed
-Tokens: 1,200 / ~5,000 est (24%)
-Tools: Read(3) Write(2) Edit(1)
-Status: Implementing PivotExtendedEvent class
-Checkpoints:
-  [15:10] Started implementation
-  [15:13] Created base class structure
+# 5 minutes later, engineer completes
+[Session manager sends to EM's input]:
+"Child child-abc123 (eng-1042) completed: PivotExtendedEvent implemented. All tests passing."
 
-# Wait for completion
-$ sm events 1749a2fe --follow
-[15:18] completed: Child abc123 completed - "PivotExtendedEvent implemented"
-[15:20] completed: Child def456 completed - "SignalResolver extracted"
+# EM continues with next ticket
+$ sm spawn "As engineer, implement ticket #1043 per spec" --wait 600 --name eng-1043
+Spawned child-def456 (def456)
+[Waiting...]
 
-# Review results
-$ sm children 1749a2fe
-engineer-eng-1042 (abc123) | completed | 8min ago | "PivotExtendedEvent implemented"
-engineer-eng-1043 (def456) | completed | 6min ago | "SignalResolver extracted"
+[Session manager sends to EM's input]:
+"Child child-def456 (eng-1043) completed: SignalResolver extracted. PR created."
 
-# Spawn architect to review
-$ sm spawn Architect "Review #1042 and #1043" --name review
-Spawned architect-review (ghi789)
+# EM spawns architect to review
+$ sm spawn "As architect, review PRs for tickets #1042 and #1043" --wait 600 --name review
+Spawned child-ghi789 (ghi789)
+[Waiting...]
+
+[Session manager sends to EM's input]:
+"Child child-ghi789 (review) completed: Both PRs approved and merged."
+
+# Check all completed work
+$ sm children
+child-abc123 (eng-1042) | completed | 15min ago | "PivotExtendedEvent implemented. All tests passing."
+child-def456 (eng-1043) | completed | 10min ago | "SignalResolver extracted. PR created."
+child-ghi789 (review) | completed | 2min ago | "Both PRs approved and merged."
 ```
 
 ### References
