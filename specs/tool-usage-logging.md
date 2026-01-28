@@ -95,40 +95,81 @@ exit 0
         "type": "command",
         "command": "/Users/rajesh/Desktop/automation/claude-session-manager/hooks/log_tool_use.sh"
       }]
+    }],
+    "SubagentStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "/Users/rajesh/Desktop/automation/claude-session-manager/hooks/log_tool_use.sh"
+      }]
+    }],
+    "SubagentStop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "/Users/rajesh/Desktop/automation/claude-session-manager/hooks/log_tool_use.sh"
+      }]
     }]
   }
 }
 ```
 
-**Hook payload structure (from Claude Code):**
+**Hook payload structure (from Claude Code official docs):**
 
 PreToolUse:
 ```json
 {
-  "hook_type": "PreToolUse",
+  "session_id": "abc123",
+  "transcript_path": "/Users/.../.claude/projects/.../00893aaf.jsonl",
+  "cwd": "/Users/...",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
   "tool_name": "Bash",
   "tool_input": {
     "command": "git push origin main",
-    "description": "Push changes to remote"
-  }
+    "description": "Push changes to remote",
+    "timeout": 120000
+  },
+  "tool_use_id": "toolu_01ABC123..."
 }
 ```
 
 PostToolUse:
 ```json
 {
-  "hook_type": "PostToolUse",
+  "session_id": "abc123",
+  "transcript_path": "/Users/.../.claude/projects/.../00893aaf.jsonl",
+  "cwd": "/Users/...",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
   "tool_name": "Bash",
   "tool_input": {
     "command": "git push origin main"
   },
-  "tool_result": {
+  "tool_response": {
     "stdout": "...",
     "stderr": "...",
-    "exit_code": 0
-  }
+    "exitCode": 0
+  },
+  "tool_use_id": "toolu_01ABC123..."
 }
 ```
+
+**Key fields:**
+- `tool_use_id`: Unique ID for correlating PreToolUse and PostToolUse events
+- `session_id`: Claude Code's internal session ID (different from our `CLAUDE_SESSION_MANAGER_ID`)
+- `hook_event_name`: The hook type (PreToolUse, PostToolUse, etc.)
+- `tool_response`: Only present in PostToolUse (note: camelCase `exitCode` not `exit_code`)
+
+**SubagentStart payload (for tracking subagent context):**
+```json
+{
+  "session_id": "abc123",
+  "hook_event_name": "SubagentStart",
+  "agent_id": "agent-def456",
+  "agent_type": "Explore"
+}
+```
+
+Tool calls made by subagents can be attributed using the `agent_id` field.
 
 ---
 
@@ -144,28 +185,41 @@ async def hook_tool_use(request: Request):
     """
     data = await request.json()
 
-    session_id = data.get("session_manager_id")
-    hook_type = data.get("hook_type")  # PreToolUse or PostToolUse
+    # Our session ID (injected by hook script)
+    session_manager_id = data.get("session_manager_id")
+
+    # Claude Code's native fields
+    claude_session_id = data.get("session_id")  # Claude's internal ID
+    hook_type = data.get("hook_event_name")  # PreToolUse or PostToolUse
     tool_name = data.get("tool_name")
     tool_input = data.get("tool_input", {})
-    tool_result = data.get("tool_result")  # Only for PostToolUse
+    tool_response = data.get("tool_response")  # Only for PostToolUse
+    tool_use_id = data.get("tool_use_id")  # For Pre/Post correlation
+    cwd = data.get("cwd")  # Working directory
+
+    # Subagent context (if present)
+    agent_id = data.get("agent_id")  # From SubagentStart context
 
     # Get session info if available
     session = None
-    if session_id:
+    if session_manager_id:
         session_manager = request.app.state.session_manager
-        session = session_manager.get_session(session_id)
+        session = session_manager.get_session(session_manager_id)
 
     # Log to database
     tool_logger = request.app.state.tool_logger
     await tool_logger.log(
-        session_id=session_id,
+        session_id=session_manager_id,
+        claude_session_id=claude_session_id,
         session_name=session.friendly_name if session else None,
         parent_session_id=session.parent_session_id if session else None,
         hook_type=hook_type,
         tool_name=tool_name,
         tool_input=tool_input,
-        tool_result=tool_result,
+        tool_response=tool_response,
+        tool_use_id=tool_use_id,
+        cwd=cwd,
+        agent_id=agent_id,
     )
 
     return {"status": "logged"}
@@ -255,26 +309,32 @@ class ToolLogger:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
 
-                -- Session info
-                session_id TEXT,
+                -- Session info (ours)
+                session_id TEXT,              -- Our CLAUDE_SESSION_MANAGER_ID
                 session_name TEXT,
                 parent_session_id TEXT,
 
+                -- Session info (Claude's native)
+                claude_session_id TEXT,       -- Claude Code's internal session ID
+                tool_use_id TEXT,             -- For correlating PreToolUse/PostToolUse
+                cwd TEXT,                     -- Working directory at time of call
+                agent_id TEXT,                -- Subagent ID if this is a subagent call
+
                 -- Hook info
-                hook_type TEXT NOT NULL,  -- PreToolUse or PostToolUse
+                hook_type TEXT NOT NULL,      -- PreToolUse or PostToolUse
 
                 -- Tool info
                 tool_name TEXT NOT NULL,
-                tool_input TEXT,          -- JSON
-                tool_result TEXT,         -- JSON (PostToolUse only)
+                tool_input TEXT,              -- JSON
+                tool_response TEXT,           -- JSON (PostToolUse only)
 
                 -- Derived fields
                 is_destructive BOOLEAN DEFAULT 0,
-                destructive_type TEXT,    -- e.g., "git_push_main", "rm_recursive"
+                destructive_type TEXT,        -- e.g., "git_push_main", "rm_recursive"
                 is_sensitive_file BOOLEAN DEFAULT 0,
-                target_file TEXT,         -- For file operations
-                bash_command TEXT,        -- For Bash tool
-                exit_code INTEGER         -- For Bash PostToolUse
+                target_file TEXT,             -- For file operations
+                bash_command TEXT,            -- For Bash tool
+                exit_code INTEGER             -- For Bash PostToolUse
             )
         """)
 
@@ -284,6 +344,8 @@ class ToolLogger:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_destructive ON tool_usage(is_destructive)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON tool_usage(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_hook_type ON tool_usage(hook_type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tool_use_id ON tool_usage(tool_use_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_id ON tool_usage(agent_id)")
 
         conn.commit()
         conn.close()
@@ -324,12 +386,16 @@ class ToolLogger:
     async def log(
         self,
         session_id: Optional[str],
+        claude_session_id: Optional[str],
         session_name: Optional[str],
         parent_session_id: Optional[str],
         hook_type: str,
         tool_name: str,
         tool_input: dict,
-        tool_result: Optional[dict] = None,
+        tool_response: Optional[dict] = None,
+        tool_use_id: Optional[str] = None,
+        cwd: Optional[str] = None,
+        agent_id: Optional[str] = None,
     ):
         """Log a tool usage event."""
         try:
@@ -344,10 +410,10 @@ class ToolLogger:
             if tool_name == "Bash":
                 bash_command = tool_input.get("command")
 
-            # Extract exit code
+            # Extract exit code (note: Claude uses camelCase "exitCode")
             exit_code = None
-            if tool_result and tool_name == "Bash":
-                exit_code = tool_result.get("exit_code")
+            if tool_response and tool_name == "Bash":
+                exit_code = tool_response.get("exitCode")
 
             # Extract target file for file operations
             if tool_name in ("Write", "Edit", "Read") and not target_file:
@@ -358,16 +424,18 @@ class ToolLogger:
 
             cursor.execute("""
                 INSERT INTO tool_usage (
-                    session_id, session_name, parent_session_id,
-                    hook_type, tool_name, tool_input, tool_result,
+                    session_id, claude_session_id, session_name, parent_session_id,
+                    tool_use_id, cwd, agent_id,
+                    hook_type, tool_name, tool_input, tool_response,
                     is_destructive, destructive_type, is_sensitive_file,
                     target_file, bash_command, exit_code
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                session_id, session_name, parent_session_id,
+                session_id, claude_session_id, session_name, parent_session_id,
+                tool_use_id, cwd, agent_id,
                 hook_type, tool_name,
                 json.dumps(tool_input) if tool_input else None,
-                json.dumps(tool_result) if tool_result else None,
+                json.dumps(tool_response) if tool_response else None,
                 is_destructive, destructive_type, is_sensitive,
                 target_file, bash_command, exit_code,
             ))
@@ -522,12 +590,15 @@ sm tools --export csv       # Export to CSV
 
 **Problem:** Matching Pre and Post events for same tool call.
 
-**Solutions:**
-- Claude Code provides `tool_use_id` in both hooks
-- Store and correlate in database
-- Or just log both independently (simpler)
+**Solution:** ✅ Claude Code provides `tool_use_id` in both hooks (verified from official docs).
 
-**Recommendation:** Check if `tool_use_id` is available. If yes, correlate.
+**Implementation:** Store `tool_use_id` in database. Query to correlate:
+```sql
+SELECT pre.*, post.tool_response, post.exit_code
+FROM tool_usage pre
+JOIN tool_usage post ON pre.tool_use_id = post.tool_use_id
+WHERE pre.hook_type = 'PreToolUse' AND post.hook_type = 'PostToolUse';
+```
 
 ### 7. Subagent Tool Usage
 
@@ -671,17 +742,17 @@ tool_logging:
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Hook payload format:** Need to verify exact JSON structure from Claude Code PreToolUse/PostToolUse hooks. Is `tool_use_id` included for correlation?
+1. **Hook payload format:** ✅ Verified from official docs. `tool_use_id` IS included for correlation. Full payload structure documented above.
 
-2. **Permissions:** Should logging require consent? Add opt-out flag per session?
+2. **Permissions:** ✅ Always opt-in. Logging is always enabled, no consent needed.
 
-3. **Subagent attribution:** When a subagent (Task tool) runs, do its tool calls include the parent's session context, or is it a separate session?
+3. **Subagent attribution:** ✅ Attribute to subagents via `agent_id` field. SubagentStart hook provides `agent_id` and `agent_type`. Tool calls within subagent context inherit this.
 
-4. **Real-time blocking:** Future enhancement - should PreToolUse be able to block a tool call? Would require hook to return non-zero exit code.
+4. **Real-time blocking:** ✅ No. This is strictly a data collection exercise. No blocking functionality.
 
-5. **Multi-machine:** If session manager runs on different machine than Claude, how to handle? (Current assumption: same machine, localhost API)
+5. **Multi-machine:** ✅ Only one machine for now. Same machine assumption (localhost API).
 
 ---
 
@@ -706,6 +777,7 @@ tool_logging:
 
 ## References
 
-- Claude Code hooks documentation
+- [Claude Code Hooks Reference](https://code.claude.com/docs/en/hooks) - Official documentation
+- [Hooks Guide](https://claude.com/blog/how-to-configure-hooks) - Anthropic blog
 - SQLite best practices for append-heavy workloads
 - Issue #26: Tool usage logging for security audit
