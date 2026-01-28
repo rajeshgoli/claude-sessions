@@ -652,6 +652,56 @@ done
 - Session Manager sends notification when child state changes
 - Parent receives via Telegram, webhook, or polling
 
+### Resume vs Re-spawn Pattern
+
+**Children stay alive after completing work** - they don't exit, they go idle waiting for more input (normal Claude Code behavior).
+
+**Lifecycle:**
+1. `sm spawn "..." --name engineer-1042` → child starts, works on initial prompt
+2. Child finishes task → goes idle, waits for input (doesn't exit)
+3. `sm send engineer-1042 "More work..."` → child wakes, resumes with full context
+4. Repeat as needed → child maintains context across multiple tasks
+5. `sm kill engineer-1042` → terminate when done (equivalent to `/exit`)
+
+**Key Points:**
+
+- **Resume with `sm send`** - No special command needed, just send more work
+- **Re-spawn only for fresh context** - Use `sm spawn` again if you want a new session without previous context
+- **Context preservation** - Resumed sessions keep full conversation history
+- **Parent controls lifecycle** - Parent decides when to resume (send), re-spawn (spawn), or terminate (kill)
+
+**Example: Multi-task workflow**
+```bash
+# Spawn engineer for first task
+$ sm spawn "As engineer, implement feature X" --wait 600 --name eng-1042
+Spawned eng-1042 (abc123)
+# ... wait for completion notification ...
+
+# Resume same engineer for follow-up work (keeps context)
+$ sm send eng-1042 "Now implement feature Y using same patterns"
+Input sent to eng-1042 (abc123)
+# ... engineer continues with full context from feature X ...
+
+# Resume again for third task
+$ sm send eng-1042 "Fix the bug in feature X you just implemented"
+# ... engineer has context of both X and Y ...
+
+# Done with this engineer
+$ sm kill eng-1042
+```
+
+**When to resume vs re-spawn:**
+
+| Scenario | Action | Reason |
+|----------|--------|--------|
+| Related follow-up work | Resume (`sm send`) | Preserve context, faster |
+| Unrelated new task | Re-spawn (`sm spawn`) | Fresh context, avoid confusion |
+| Bug fix in prior work | Resume (`sm send`) | Needs context of original implementation |
+| Context too large | Re-spawn (`sm spawn`) | Start fresh to avoid token limits |
+| Different persona | Re-spawn (`sm spawn`) | New role requires different initial prompt |
+
+This matches natural Claude Code session behavior - sessions stay alive until explicitly exited.
+
 ## Parent-Child Communication
 
 ### Parent → Child
