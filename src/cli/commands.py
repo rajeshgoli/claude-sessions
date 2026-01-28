@@ -580,8 +580,11 @@ def cmd_send(client: SessionManagerClient, identifier: str, text: str) -> int:
             print(f"Error: Session '{identifier}' not found", file=sys.stderr)
             return 1
 
-    # Send input
-    success, unavailable = client.send_input(session_id, text)
+    # Get sender session ID from environment (if available)
+    sender_session_id = client.session_id  # Set from CLAUDE_SESSION_MANAGER_ID in __init__
+
+    # Send input with sender metadata
+    success, unavailable = client.send_input(session_id, text, sender_session_id=sender_session_id)
 
     if unavailable:
         print("Error: Session manager unavailable", file=sys.stderr)

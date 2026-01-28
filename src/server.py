@@ -33,6 +33,7 @@ class SessionResponse(BaseModel):
 class SendInputRequest(BaseModel):
     """Request to send input to a session."""
     text: str
+    sender_session_id: Optional[str] = None  # Optional sender identification
 
 
 class NotifyRequest(BaseModel):
@@ -252,7 +253,11 @@ def create_app(
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        success = app.state.session_manager.send_input(session_id, request.text)
+        success = app.state.session_manager.send_input(
+            session_id,
+            request.text,
+            sender_session_id=request.sender_session_id
+        )
 
         if not success:
             raise HTTPException(status_code=500, detail="Failed to send input")
