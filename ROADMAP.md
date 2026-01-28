@@ -2,6 +2,76 @@
 
 ## Recent Work (2026-01-27)
 
+### Session 4: Multi-Agent Coordination Phase 1 MVP
+
+**What was completed:**
+
+1. **Session Model Extensions** (src/models.py)
+   - Added parent-child relationship tracking (`parent_session_id`)
+   - Added spawn metadata: `spawn_prompt`, `completion_status`, `completion_message`
+   - Added lifecycle timestamps: `spawned_at`, `completed_at`
+   - Added progress tracking: `tokens_used`, `tools_used`, `last_tool_call`
+
+2. **sm spawn Command**
+   - Create child Claude Code sessions from parent agents
+   - Flags: `--name`, `--wait N`, `--model`, `--working-dir`, `--json`
+   - Non-blocking: returns immediately, monitors in background
+   - Model override support (opus/sonnet/haiku)
+   - API endpoint: `POST /sessions/spawn`
+   - SessionManager.spawn_child_session() implementation
+   - TmuxController.create_session_with_command() for custom Claude invocation
+
+3. **sm children Command**
+   - List all child sessions of a parent
+   - Flags: `--recursive` (include grandchildren), `--status` (filter), `--json`
+   - Shows completion status and messages
+   - API endpoint: `GET /sessions/{parent_session_id}/children`
+
+4. **sm kill Command Enhancement**
+   - **CRITICAL SECURITY**: Parent-child ownership check
+   - Only allows killing own children (prevents agent interference)
+   - API endpoint: `POST /sessions/{target_session_id}/kill`
+   - Prevents "virtual bloodbath" scenario
+
+5. **Background Monitoring for --wait** (src/child_monitor.py)
+   - ChildMonitor service monitors child sessions
+   - Detects: idle timeout (N seconds), completion patterns, session exit
+   - Extracts completion summary from transcript/tmux output
+   - Sends notification to parent's Claude input when complete
+   - Non-blocking: parent doesn't burn tokens waiting
+
+6. **Delivery Modes for sm send** (src/message_queue.py)
+   - `--sequential` (default): Queues message, waits for idle (30s threshold)
+   - `--important`: Sends immediately
+   - `--urgent`: Interrupts immediately
+   - MessageQueueManager monitors queues, delivers when idle
+   - Updated SendInputRequest with delivery_mode parameter
+
+**Implementation Details:**
+- Spec: `specs/multi-agent-coordination.md` (Phase 1)
+- 11 files changed: 8 modified, 2 new (child_monitor.py, message_queue.py)
+- 1,211 lines added
+- All basic tests pass
+- Integration testing completed with multi-session environment
+
+**Git Status:**
+- Initial implementation: `0932fcd` - Implement Multi-Agent Coordination Phase 1 MVP
+- Bug fix: `c9d99d7` - Fix --working-dir argument handling in sm spawn
+- Branch: `main`
+- Ready for Phase 2 (auto-detection, transcript parsing, advanced monitoring)
+
+**Known Issues:**
+- ✅ Issue #15 (sm send intermittent failures): Resolved - Python bytecode caching with editable install
+
+**Testing:**
+- ✅ All imports successful
+- ✅ Session model has new fields
+- ✅ CLI commands registered (spawn, children, kill)
+- ✅ Multi-session validation (scout-correlation testing)
+- ✅ Delivery modes working correctly
+
+---
+
 ### Session 3: sm CLI Demo & Timeout Fix
 
 **What was completed:**
@@ -247,6 +317,15 @@
   - Lock file fallback when session manager unavailable
   - Git worktree support via remote URL matching
   - Exit codes for scripting (0=success, 1=error, 2=unavailable)
+- ✅ **Multi-Agent Coordination Phase 1** (Session 4)
+  - sm spawn: Create child agent sessions with model override
+  - sm children: List child sessions with recursive/status filters
+  - sm kill: Terminate children with ownership check (security)
+  - Background monitoring: --wait flag for completion notifications
+  - Delivery modes: --sequential/--important/--urgent for sm send
+  - Parent-child session hierarchy with full lifecycle tracking
+  - MessageQueueManager for sequential delivery mode
+  - ChildMonitor for automatic completion detection
 
 ---
 
