@@ -227,25 +227,34 @@ Rarely needed - typically use `sm spawn --wait` which notifies parent automatica
 - Investigating why child hasn't completed
 - Manual debugging
 
-### `sm send` - Send Input to Child Session (Optional)
+### `sm send` - Send Input to Any Session (Optional)
 
 **Syntax:**
 ```bash
 sm send <session-id> "<text>"
 ```
 
+**Arguments:**
+- `session-id`: Any session managed by Session Manager (not just your children)
+- `text`: Text to send to the session's Claude input
+
 **Example:**
 ```bash
 # Parent sends input to child
 $ sm send def456 "Add error handling for network failures"
 Input sent to session def456
+
+# Any agent can send to any other session
+$ sm send 1749a2fe "The database migration is complete, you can proceed"
+Input sent to session 1749a2fe
 ```
 
 **Use Case:**
 Rarely needed. Useful for:
-- Answering child's questions
+- Parent answering child's questions
 - Providing additional context mid-task
-- Course-correcting a stuck child
+- Course-correcting a stuck session
+- Coordinating between parallel agents
 
 ## Auto-Detection
 
