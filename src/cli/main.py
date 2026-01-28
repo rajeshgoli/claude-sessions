@@ -72,14 +72,43 @@ def main():
     send_parser = subparsers.add_parser("send", help="Send input to a session")
     send_parser.add_argument("session_id", help="Target session ID")
     send_parser.add_argument("text", help="Text to send to the session")
+    send_parser.add_argument("--sequential", action="store_true", help="Wait for idle before sending (default)")
+    send_parser.add_argument("--important", action="store_true", help="Inject immediately, queue behind current work")
+    send_parser.add_argument("--urgent", action="store_true", help="Interrupt immediately")
+
+    # sm spawn "<prompt>"
+    spawn_parser = subparsers.add_parser("spawn", help="Spawn a child agent session")
+    spawn_parser.add_argument("prompt", help="Initial prompt for the child agent")
+    spawn_parser.add_argument("--name", help="Friendly name for the child session")
+    spawn_parser.add_argument("--wait", type=int, metavar="SECONDS", help="Monitor child and notify when complete or idle for N seconds")
+    spawn_parser.add_argument("--model", choices=["opus", "sonnet", "haiku"], help="Override default model")
+    spawn_parser.add_argument("--working-dir", help="Override working directory (defaults to parent's directory)")
+    spawn_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # sm children [session-id]
+    children_parser = subparsers.add_parser("children", help="List child sessions")
+    children_parser.add_argument("session_id", nargs="?", help="Parent session ID (defaults to current)")
+    children_parser.add_argument("--recursive", action="store_true", help="Include grandchildren")
+    children_parser.add_argument("--status", choices=["running", "completed", "error", "all"], help="Filter by status")
+    children_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # sm kill <session-id>
+    kill_parser = subparsers.add_parser("kill", help="Terminate a child session")
+    kill_parser.add_argument("session_id", help="Session ID to terminate")
 
     args = parser.parse_args()
 
     # Check for CLAUDE_SESSION_MANAGER_ID
     session_id = os.environ.get("CLAUDE_SESSION_MANAGER_ID")
-    # Commands that don't need session_id: lock, unlock, hooks, all, send, what, subagents
-    no_session_needed = ["lock", "unlock", "subagent-start", "subagent-stop", "all", "send", "what", "subagents", None]
-    if not session_id and args.command not in no_session_needed:
+    # Commands that don't need session_id: lock, unlock, hooks, all, send, what, subagents, children, kill
+    no_session_needed = ["lock", "unlock", "subagent-start", "subagent-stop", "all", "send", "what", "subagents", "children", "kill", None]
+    # Commands that require session_id: spawn (needs to set parent_session_id)
+    requires_session_id = ["spawn"]
+    if not session_id and args.command in requires_session_id:
+        print("Error: CLAUDE_SESSION_MANAGER_ID environment variable not set", file=sys.stderr)
+        print("This tool must be run inside a Claude Code session managed by Session Manager", file=sys.stderr)
+        sys.exit(2)
+    if not session_id and args.command not in no_session_needed and args.command not in requires_session_id:
         print("Error: CLAUDE_SESSION_MANAGER_ID environment variable not set", file=sys.stderr)
         print("This tool must be run inside a Claude Code session managed by Session Manager", file=sys.stderr)
         sys.exit(2)
@@ -117,7 +146,21 @@ def main():
     elif args.command == "subagents":
         sys.exit(commands.cmd_subagents(client, args.session_id))
     elif args.command == "send":
-        sys.exit(commands.cmd_send(client, args.session_id, args.text))
+        # Determine delivery mode
+        delivery_mode = "sequential"  # default
+        if args.urgent:
+            delivery_mode = "urgent"
+        elif args.important:
+            delivery_mode = "important"
+        sys.exit(commands.cmd_send(client, args.session_id, args.text, delivery_mode))
+    elif args.command == "spawn":
+        sys.exit(commands.cmd_spawn(client, session_id, args.prompt, args.name, args.wait, args.model, getattr(args, 'working_dir', None), args.json))
+    elif args.command == "children":
+        # Use current session if not specified
+        parent_id = args.session_id if args.session_id else session_id
+        sys.exit(commands.cmd_children(client, parent_id, args.recursive, args.status, args.json))
+    elif args.command == "kill":
+        sys.exit(commands.cmd_kill(client, session_id, args.session_id))
     else:
         parser.print_help()
         sys.exit(0)

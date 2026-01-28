@@ -21,14 +21,19 @@ class SessionManager:
         self,
         log_dir: str = "/tmp/claude-sessions",
         state_file: str = "/tmp/claude-sessions/sessions.json",
+        config: Optional[dict] = None,
     ):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.state_file = Path(state_file)
+        self.config = config or {}
 
         self.tmux = TmuxController(log_dir=log_dir)
         self.sessions: dict[str, Session] = {}
         self._event_handlers: list[Callable[[NotificationEvent], Awaitable[None]]] = []
+
+        # Message queue manager (set by main app)
+        self.message_queue_manager = None
 
         # Load existing sessions from state file
         self._load_state()
@@ -148,6 +153,94 @@ class SessionManager:
         logger.info(f"Created session {session.name} (id={session.id})")
         return session
 
+    def spawn_child_session(
+        self,
+        parent_session_id: str,
+        prompt: str,
+        name: Optional[str] = None,
+        wait: Optional[int] = None,
+        model: Optional[str] = None,
+        working_dir: Optional[str] = None,
+    ) -> Optional[Session]:
+        """
+        Spawn a child agent session.
+
+        Args:
+            parent_session_id: Parent session ID
+            prompt: Initial prompt for the child agent
+            name: Friendly name for the child session
+            wait: Monitor child and notify when complete or idle for N seconds
+            model: Model override (opus, sonnet, haiku)
+            working_dir: Working directory (defaults to parent's directory)
+
+        Returns:
+            Created child Session or None on failure
+        """
+        from datetime import datetime
+
+        # Get parent session
+        parent_session = self.sessions.get(parent_session_id)
+        if not parent_session:
+            logger.error(f"Parent session not found: {parent_session_id}")
+            return None
+
+        # Get Claude config
+        claude_config = self.config.get("claude", {})
+        claude_command = claude_config.get("command", "claude")
+        claude_args = claude_config.get("args", [])
+        default_model = claude_config.get("default_model", "sonnet")
+
+        # Override model if specified
+        selected_model = model or default_model
+
+        # Create child session
+        session = Session(
+            working_dir=working_dir or parent_session.working_dir,
+            friendly_name=name,
+            parent_session_id=parent_session_id,
+            spawn_prompt=prompt,
+            spawned_at=datetime.now(),
+        )
+
+        # Generate session name
+        if name:
+            session.name = name
+            session.tmux_session = f"claude-{name}"
+        else:
+            session.name = f"child-{session.id}"
+            session.tmux_session = f"claude-{session.id}"
+
+        # Set up log file path
+        session.log_file = str(self.log_dir / f"{session.name}.log")
+
+        # Detect git remote URL for repo matching
+        session.git_remote_url = self._get_git_remote_url(session.working_dir)
+
+        # Create the tmux session with custom command and model
+        if not self.tmux.create_session_with_command(
+            session.tmux_session,
+            session.working_dir,
+            session.log_file,
+            session_id=session.id,
+            command=claude_command,
+            args=claude_args,
+            model=selected_model,
+            initial_prompt=prompt,
+        ):
+            logger.error(f"Failed to create tmux session for {session.name}")
+            return None
+
+        session.status = SessionStatus.RUNNING
+        self.sessions[session.id] = session
+        self._save_state()
+
+        logger.info(f"Spawned child session {session.name} (id={session.id}, parent={parent_session_id})")
+
+        # TODO: Register background monitoring if wait is specified
+        # This will be implemented in Task #5
+
+        return session
+
     def get_session(self, session_id: str) -> Optional[Session]:
         """Get a session by ID."""
         return self.sessions.get(session_id)
@@ -195,14 +288,21 @@ class SessionManager:
             session.telegram_root_msg_id = message_id
             self._save_state()
 
-    def send_input(self, session_id: str, text: str, sender_session_id: Optional[str] = None) -> bool:
+    def send_input(
+        self,
+        session_id: str,
+        text: str,
+        sender_session_id: Optional[str] = None,
+        delivery_mode: str = "sequential",
+    ) -> bool:
         """
-        Send input to a session with optional sender metadata.
+        Send input to a session with optional sender metadata and delivery mode.
 
         Args:
             session_id: Target session ID
             text: Text to send
             sender_session_id: Optional ID of sending session (for metadata)
+            delivery_mode: Delivery mode (sequential, important, urgent)
 
         Returns:
             True if successful
@@ -224,6 +324,15 @@ class SessionManager:
         else:
             formatted_text = text
 
+        # Handle delivery modes
+        if delivery_mode == "sequential" and self.message_queue_manager:
+            # Check if session is idle
+            if not self.message_queue_manager.is_session_idle(session_id):
+                # Session is active, queue the message
+                return self.message_queue_manager.queue_message(session_id, formatted_text)
+            # else: session is idle, send immediately (fall through)
+
+        # For important, urgent, or idle sequential: send immediately
         success = self.tmux.send_input(session.tmux_session, formatted_text)
         if success:
             session.last_activity = datetime.now()

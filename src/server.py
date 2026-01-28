@@ -34,6 +34,7 @@ class SendInputRequest(BaseModel):
     """Request to send input to a session."""
     text: str
     sender_session_id: Optional[str] = None  # Optional sender identification
+    delivery_mode: str = "sequential"  # sequential, important, urgent
 
 
 class NotifyRequest(BaseModel):
@@ -81,10 +82,26 @@ class SubagentResponse(BaseModel):
     summary: Optional[str] = None
 
 
+class SpawnChildRequest(BaseModel):
+    """Request to spawn a child agent session."""
+    parent_session_id: str
+    prompt: str
+    name: Optional[str] = None
+    wait: Optional[int] = None
+    model: Optional[str] = None
+    working_dir: Optional[str] = None
+
+
+class KillSessionRequest(BaseModel):
+    """Request to kill a session with ownership check."""
+    requester_session_id: Optional[str] = None
+
+
 def create_app(
     session_manager=None,
     notifier=None,
     output_monitor=None,
+    child_monitor=None,
 ) -> FastAPI:
     """
     Create the FastAPI application.
@@ -107,6 +124,7 @@ def create_app(
     app.state.session_manager = session_manager
     app.state.notifier = notifier
     app.state.output_monitor = output_monitor
+    app.state.child_monitor = child_monitor
     app.state.last_claude_output = {}  # Store last output per session from hooks
 
     @app.get("/")
@@ -256,7 +274,8 @@ def create_app(
         success = app.state.session_manager.send_input(
             session_id,
             request.text,
-            sender_session_id=request.sender_session_id
+            sender_session_id=request.sender_session_id,
+            delivery_mode=request.delivery_mode,
         )
 
         if not success:
@@ -739,5 +758,131 @@ Provide ONLY the summary, no preamble or questions."""
                     )
 
         return {"status": "received", "hook_event": hook_event}
+
+    @app.post("/sessions/spawn")
+    async def spawn_child_session(request: SpawnChildRequest):
+        """Spawn a child agent session."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        # Get parent session
+        parent_session = app.state.session_manager.get_session(request.parent_session_id)
+        if not parent_session:
+            return {"error": "Parent session not found"}
+
+        # Spawn child session
+        child_session = app.state.session_manager.spawn_child_session(
+            parent_session_id=request.parent_session_id,
+            prompt=request.prompt,
+            name=request.name,
+            wait=request.wait,
+            model=request.model,
+            working_dir=request.working_dir or parent_session.working_dir,
+        )
+
+        if not child_session:
+            return {"error": "Failed to spawn child session"}
+
+        # Start monitoring the child session
+        if app.state.output_monitor:
+            await app.state.output_monitor.start_monitoring(child_session)
+
+        # Register for --wait monitoring if specified
+        if request.wait and app.state.child_monitor:
+            app.state.child_monitor.register_child(
+                child_session_id=child_session.id,
+                parent_session_id=request.parent_session_id,
+                wait_seconds=request.wait,
+            )
+
+        return {
+            "session_id": child_session.id,
+            "name": child_session.name,
+            "friendly_name": child_session.friendly_name,
+            "working_dir": child_session.working_dir,
+            "parent_session_id": child_session.parent_session_id,
+            "tmux_session": child_session.tmux_session,
+            "created_at": child_session.created_at.isoformat(),
+        }
+
+    @app.get("/sessions/{parent_session_id}/children")
+    async def list_children_sessions(
+        parent_session_id: str,
+        recursive: bool = False,
+        status: Optional[str] = None,
+    ):
+        """List child sessions of a parent."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        # Get all sessions and filter by parent_session_id
+        all_sessions = app.state.session_manager.list_sessions(include_stopped=True)
+        children = [s for s in all_sessions if s.parent_session_id == parent_session_id]
+
+        # Filter by status if specified
+        if status and status != "all":
+            if status == "running":
+                children = [s for s in children if s.status == SessionStatus.RUNNING]
+            elif status == "completed":
+                children = [s for s in children if s.completion_status == "completed"]
+            elif status == "error":
+                children = [s for s in children if s.completion_status == "error"]
+
+        # Handle recursive
+        if recursive:
+            all_descendants = []
+            for child in children:
+                all_descendants.append(child)
+                # Get grandchildren
+                grandchildren = [s for s in all_sessions if s.parent_session_id == child.id]
+                all_descendants.extend(grandchildren)
+            children = all_descendants
+
+        return {
+            "parent_session_id": parent_session_id,
+            "children": [
+                {
+                    "id": s.id,
+                    "name": s.name,
+                    "friendly_name": s.friendly_name,
+                    "status": s.status.value,
+                    "completion_status": s.completion_status,
+                    "completion_message": s.completion_message,
+                    "last_activity": s.last_activity.isoformat(),
+                    "spawned_at": s.spawned_at.isoformat() if s.spawned_at else None,
+                    "completed_at": s.completed_at.isoformat() if s.completed_at else None,
+                }
+                for s in children
+            ],
+        }
+
+    @app.post("/sessions/{target_session_id}/kill")
+    async def kill_session_with_check(target_session_id: str, request: KillSessionRequest):
+        """Kill a session with parent-child ownership check."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        # Get target session
+        target_session = app.state.session_manager.get_session(target_session_id)
+        if not target_session:
+            return {"error": f"Session {target_session_id} not found"}
+
+        # Check ownership if requester provided
+        if request.requester_session_id:
+            # Requester must be the parent
+            if target_session.parent_session_id != request.requester_session_id:
+                return {"error": f"Cannot kill session {target_session_id} - not your child session"}
+
+        # Stop monitoring
+        if app.state.output_monitor:
+            await app.state.output_monitor.stop_monitoring(target_session_id)
+
+        # Kill the session
+        success = app.state.session_manager.kill_session(target_session_id)
+
+        if not success:
+            return {"error": "Failed to kill session"}
+
+        return {"status": "killed", "session_id": target_session_id}
 
     return app

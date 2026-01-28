@@ -92,6 +92,17 @@ class Session:
     git_remote_url: Optional[str] = None  # Git remote URL for repo matching
     subagents: List[Subagent] = field(default_factory=list)  # Subagents spawned by this session
 
+    # Multi-agent coordination fields
+    parent_session_id: Optional[str] = None  # Parent that spawned this session
+    spawn_prompt: Optional[str] = None  # Initial prompt used to spawn
+    completion_status: Optional[str] = None  # completed, error, abandoned, killed
+    completion_message: Optional[str] = None  # Message when completed
+    spawned_at: Optional[datetime] = None  # When this session was spawned
+    completed_at: Optional[datetime] = None  # When this session completed
+    tokens_used: int = 0  # Approximate token count
+    tools_used: dict[str, int] = field(default_factory=dict)  # {"Read": 5, "Write": 3}
+    last_tool_call: Optional[datetime] = None  # Last tool usage timestamp
+
     def __post_init__(self):
         if not self.name:
             self.name = f"claude-{self.id}"
@@ -118,6 +129,16 @@ class Session:
             "current_task": self.current_task,
             "git_remote_url": self.git_remote_url,
             "subagents": [s.to_dict() for s in self.subagents],
+            # Multi-agent coordination fields
+            "parent_session_id": self.parent_session_id,
+            "spawn_prompt": self.spawn_prompt,
+            "completion_status": self.completion_status,
+            "completion_message": self.completion_message,
+            "spawned_at": self.spawned_at.isoformat() if self.spawned_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "tokens_used": self.tokens_used,
+            "tools_used": self.tools_used,
+            "last_tool_call": self.last_tool_call.isoformat() if self.last_tool_call else None,
         }
 
     @classmethod
@@ -144,6 +165,16 @@ class Session:
             current_task=data.get("current_task"),
             git_remote_url=data.get("git_remote_url"),
             subagents=subagents,
+            # Multi-agent coordination fields
+            parent_session_id=data.get("parent_session_id"),
+            spawn_prompt=data.get("spawn_prompt"),
+            completion_status=data.get("completion_status"),
+            completion_message=data.get("completion_message"),
+            spawned_at=datetime.fromisoformat(data["spawned_at"]) if data.get("spawned_at") else None,
+            completed_at=datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None,
+            tokens_used=data.get("tokens_used", 0),
+            tools_used=data.get("tools_used", {}),
+            last_tool_call=datetime.fromisoformat(data["last_tool_call"]) if data.get("last_tool_call") else None,
         )
 
 

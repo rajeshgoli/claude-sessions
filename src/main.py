@@ -17,6 +17,8 @@ from .telegram_bot import TelegramBot
 from .email_handler import EmailHandler
 from .notifier import Notifier
 from .server import create_app
+from .child_monitor import ChildMonitor
+from .message_queue import MessageQueueManager
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,7 @@ class SessionManagerApp:
         self.session_manager = SessionManager(
             log_dir=self.log_dir,
             state_file=self.state_file,
+            config=config,
         )
 
         monitor_config = config.get("monitor", {})
@@ -97,11 +100,20 @@ class SessionManagerApp:
         self.output_monitor.set_save_state_callback(self.session_manager._save_state)
         self.output_monitor.set_session_manager(self.session_manager)
 
+        # Child monitor for --wait functionality
+        self.child_monitor = ChildMonitor(self.session_manager)
+
+        # Message queue manager for sequential delivery mode
+        self.message_queue = MessageQueueManager(self.session_manager)
+        # Pass message queue to session manager
+        self.session_manager.message_queue_manager = self.message_queue
+
         # Create FastAPI app
         self.app = create_app(
             session_manager=self.session_manager,
             notifier=self.notifier,
             output_monitor=self.output_monitor,
+            child_monitor=self.child_monitor,
         )
 
         # Connect output monitor to hook output storage
@@ -233,6 +245,14 @@ class SessionManagerApp:
         """Start all components."""
         logger.info("Starting Claude Session Manager...")
 
+        # Start child monitor
+        await self.child_monitor.start()
+        logger.info("Child monitor started")
+
+        # Start message queue manager
+        await self.message_queue.start()
+        logger.info("Message queue manager started")
+
         # Start Telegram bot if configured
         if self.telegram_bot:
             await self.telegram_bot.start()
@@ -270,6 +290,12 @@ class SessionManagerApp:
 
         # Stop output monitor
         await self.output_monitor.stop_all()
+
+        # Stop child monitor
+        await self.child_monitor.stop()
+
+        # Stop message queue manager
+        await self.message_queue.stop()
 
         # Stop Telegram bot
         if self.telegram_bot:

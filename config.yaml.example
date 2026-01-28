@@ -39,3 +39,53 @@ email:
 services:
   # Office automation service (for /password command and other utilities)
   office_automate_url: "http://192.168.5.140:8080"
+
+# Multi-agent coordination settings
+claude:
+  # Command to spawn Claude Code sessions (user-controlled, agents cannot override)
+  command: "claude"
+  # Command-line arguments (user-controlled, agents cannot override)
+  args:
+    - "--bypass-permissions"
+  # Default model for spawned sessions (agent can override with --model flag)
+  default_model: "sonnet"
+
+child_agents:
+  # Auto-completion detection
+  auto_complete:
+    enabled: true
+    idle_timeout: 600  # Seconds (10 minutes)
+    detect_completion_phrases: true
+    completion_patterns:
+      - "complete"
+      - "done"
+      - "finished"
+      - "all tests pass"
+
+  # Cleanup behavior
+  cleanup:
+    auto_kill_on_complete: false      # Keep tmux session running
+    auto_archive_transcript: true     # Save transcript on completion
+    archive_path: "/tmp/claude-sessions/archives"
+
+  # Parent notifications (via sending text to parent's Claude input)
+  notifications:
+    notify_parent_on_complete: true
+    notify_parent_on_error: true
+    notify_parent_on_idle: true  # When --wait timeout reached
+
+  # Progress tracking (auto-detected from transcript)
+  progress:
+    enable_token_tracking: true     # Approximate from transcript length
+    enable_tool_tracking: true      # Count tool calls in transcript
+    snapshot_interval: 30           # Seconds between checks
+
+# Session defaults
+sessions:
+  default_working_dir_behavior: "inherit"  # inherit | specify
+  inherit_environment_vars:
+    - "SSH_AUTH_SOCK"
+    - "PATH"
+  naming:
+    pattern: "{friendly_name}"               # e.g., task1042-fix
+    fallback: "child-{short_id}"             # e.g., child-abc123

@@ -554,7 +554,7 @@ def cmd_subagents(client: SessionManagerClient, target_session_id: str) -> int:
     return 0
 
 
-def cmd_send(client: SessionManagerClient, identifier: str, text: str) -> int:
+def cmd_send(client: SessionManagerClient, identifier: str, text: str, delivery_mode: str = "sequential") -> int:
     """
     Send input text to a session.
 
@@ -562,6 +562,7 @@ def cmd_send(client: SessionManagerClient, identifier: str, text: str) -> int:
         client: API client
         identifier: Target session ID or friendly name
         text: Text to send
+        delivery_mode: Delivery mode (sequential, important, urgent)
 
     Exit codes:
         0: Success
@@ -583,8 +584,8 @@ def cmd_send(client: SessionManagerClient, identifier: str, text: str) -> int:
     # Get sender session ID from environment (if available)
     sender_session_id = client.session_id  # Set from CLAUDE_SESSION_MANAGER_ID in __init__
 
-    # Send input with sender metadata
-    success, unavailable = client.send_input(session_id, text, sender_session_id=sender_session_id)
+    # Send input with sender metadata and delivery mode
+    success, unavailable = client.send_input(session_id, text, sender_session_id=sender_session_id, delivery_mode=delivery_mode)
 
     if unavailable:
         print("Error: Session manager unavailable", file=sys.stderr)
@@ -594,7 +595,181 @@ def cmd_send(client: SessionManagerClient, identifier: str, text: str) -> int:
         print(f"Error: Failed to send input to session {session_id}", file=sys.stderr)
         return 1
 
-    # Success
+    # Success - show different message based on delivery mode
     name = session.get("friendly_name") or session.get("name") or session_id
-    print(f"Input sent to {name} ({session_id})")
+    if delivery_mode == "sequential":
+        print(f"Queued for {name} ({session_id}) (will inject when idle)")
+    elif delivery_mode == "urgent":
+        print(f"Input sent to {name} ({session_id}) (interrupted)")
+    else:  # important
+        print(f"Input sent to {name} ({session_id})")
+    return 0
+
+
+def cmd_spawn(
+    client: SessionManagerClient,
+    parent_session_id: str,
+    prompt: str,
+    name: Optional[str] = None,
+    wait: Optional[int] = None,
+    model: Optional[str] = None,
+    working_dir: Optional[str] = None,
+    json_output: bool = False,
+) -> int:
+    """
+    Spawn a child agent session.
+
+    Args:
+        client: API client
+        parent_session_id: Parent session ID (current session)
+        prompt: Initial prompt for the child agent
+        name: Friendly name for the child session
+        wait: Monitor child and notify when complete or idle for N seconds
+        model: Model override (opus, sonnet, haiku)
+        working_dir: Working directory override
+        json_output: Output JSON format
+
+    Exit codes:
+        0: Success
+        1: Failed to spawn
+        2: Session manager unavailable
+    """
+    import json as json_lib
+
+    # Spawn child session
+    result = client.spawn_child(
+        parent_session_id=parent_session_id,
+        prompt=prompt,
+        name=name,
+        wait=wait,
+        model=model,
+        working_dir=working_dir,
+    )
+
+    if result is None:
+        print("Error: Session manager unavailable", file=sys.stderr)
+        return 2
+
+    if result.get("error"):
+        print(f"Error: {result['error']}", file=sys.stderr)
+        return 1
+
+    # Success
+    if json_output:
+        print(json_lib.dumps(result, indent=2))
+    else:
+        child_id = result["session_id"]
+        child_name = result.get("friendly_name") or result["name"]
+        print(f"Spawned {child_name} ({child_id}) in tmux session {result['tmux_session']}")
+
+    return 0
+
+
+def cmd_children(
+    client: SessionManagerClient,
+    parent_session_id: str,
+    recursive: bool = False,
+    status_filter: Optional[str] = None,
+    json_output: bool = False,
+) -> int:
+    """
+    List child sessions.
+
+    Args:
+        client: API client
+        parent_session_id: Parent session ID
+        recursive: Include grandchildren
+        status_filter: Filter by status (running, completed, error, all)
+        json_output: Output JSON format
+
+    Exit codes:
+        0: Success (children found)
+        1: No children or error
+        2: Session manager unavailable
+    """
+    import json as json_lib
+
+    # Get children
+    result = client.list_children(
+        parent_session_id=parent_session_id,
+        recursive=recursive,
+        status_filter=status_filter,
+    )
+
+    if result is None:
+        print("Error: Session manager unavailable", file=sys.stderr)
+        return 2
+
+    children = result.get("children", [])
+    if not children:
+        if not json_output:
+            print("No child sessions")
+        return 1
+
+    if json_output:
+        print(json_lib.dumps(children, indent=2))
+    else:
+        for child in children:
+            name = child.get("friendly_name") or child["name"]
+            child_id = child["id"]
+            status = child.get("completion_status") or child["status"]
+            last_activity = child.get("last_activity", "")
+            completion_msg = child.get("completion_message", "")
+
+            # Format last activity as relative time
+            if last_activity:
+                from datetime import datetime
+                try:
+                    activity_time = datetime.fromisoformat(last_activity)
+                    elapsed = format_relative_time(activity_time)
+                except:
+                    elapsed = "unknown"
+            else:
+                elapsed = "unknown"
+
+            # Print child info
+            status_icon = "✓" if status == "completed" else "●" if status == "running" else "✗"
+            print(f"{name} ({child_id}) | {status} | {elapsed}", end="")
+            if completion_msg:
+                print(f' | "{completion_msg}"')
+            else:
+                print()
+
+    return 0
+
+
+def cmd_kill(
+    client: SessionManagerClient,
+    requester_session_id: Optional[str],
+    target_session_id: str,
+) -> int:
+    """
+    Kill a child session (with parent-child ownership check).
+
+    Args:
+        client: API client
+        requester_session_id: Requesting session ID (must be parent)
+        target_session_id: Target session ID to kill
+
+    Exit codes:
+        0: Success
+        1: Not authorized or failed
+        2: Session manager unavailable
+    """
+    # Kill session with ownership check
+    result = client.kill_session(
+        requester_session_id=requester_session_id,
+        target_session_id=target_session_id,
+    )
+
+    if result is None:
+        print("Error: Session manager unavailable", file=sys.stderr)
+        return 2
+
+    if result.get("error"):
+        print(f"Error: {result['error']}", file=sys.stderr)
+        return 1
+
+    # Success
+    print(f"Session {target_session_id} terminated")
     return 0

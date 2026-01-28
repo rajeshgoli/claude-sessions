@@ -136,6 +136,115 @@ class TmuxController:
             logger.error(f"Failed to create session: {e.stderr}")
             return False
 
+    def create_session_with_command(
+        self,
+        session_name: str,
+        working_dir: str,
+        log_file: str,
+        session_id: Optional[str] = None,
+        command: str = "claude",
+        args: list[str] = None,
+        model: Optional[str] = None,
+        initial_prompt: Optional[str] = None,
+    ) -> bool:
+        """
+        Create a new tmux session with custom Claude Code command.
+
+        Args:
+            session_name: Name for the tmux session
+            working_dir: Directory to start Claude in
+            log_file: Path to pipe output to
+            session_id: Session manager session ID to pass to Claude
+            command: Claude command (e.g., 'claude')
+            args: Additional command-line arguments
+            model: Model to use (opus, sonnet, haiku)
+            initial_prompt: Initial prompt to send to Claude
+
+        Returns:
+            True if session created successfully
+        """
+        if self.session_exists(session_name):
+            logger.warning(f"Session {session_name} already exists")
+            return False
+
+        working_path = Path(working_dir).expanduser().resolve()
+        if not working_path.exists():
+            logger.error(f"Working directory does not exist: {working_dir}")
+            return False
+
+        # Ensure log file parent directory exists
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.touch()
+
+        try:
+            # Create new detached tmux session
+            self._run_tmux(
+                "new-session",
+                "-d",
+                "-s", session_name,
+                "-c", str(working_path),
+            )
+
+            # Set up pipe-pane to capture output to log file
+            self._run_tmux(
+                "pipe-pane",
+                "-t", session_name,
+                f"cat >> {log_file}",
+            )
+
+            # Set up environment variable first (persists in the shell)
+            if session_id:
+                # Export session ID so it persists
+                self._run_tmux(
+                    "send-keys",
+                    "-t", session_name,
+                    f"export CLAUDE_SESSION_MANAGER_ID={session_id}",
+                    "Enter",
+                )
+                # Small delay to ensure export completes
+                import time
+                time.sleep(0.1)
+
+            # Build Claude command with args and model
+            cmd_parts = [command]
+            if args:
+                cmd_parts.extend(args)
+            if model:
+                # Add model flag (e.g., --model sonnet)
+                cmd_parts.extend(["--model", model])
+
+            # Start Claude Code in the session
+            self._run_tmux(
+                "send-keys",
+                "-t", session_name,
+                " ".join(cmd_parts),
+                "Enter",
+            )
+
+            # Wait for Claude to start
+            import time
+            time.sleep(1)
+
+            # Send initial prompt if provided
+            if initial_prompt:
+                # Give Claude time to initialize
+                time.sleep(0.5)
+                # Send the prompt
+                self._run_tmux(
+                    "send-keys",
+                    "-t", session_name,
+                    initial_prompt,
+                    "Enter",
+                )
+
+            logger.info(f"Created child session {session_name} (id={session_id}) with command {' '.join(cmd_parts)}")
+            return True
+
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to create session: {e.stderr}")
+            return False
+
     def send_input(self, session_name: str, text: str) -> bool:
         """
         Send input text to a tmux session.

@@ -149,7 +149,7 @@ class SessionManagerClient:
             return data.get("subagents", [])
         return None
 
-    def send_input(self, session_id: str, text: str, sender_session_id: Optional[str] = None) -> tuple[bool, bool]:
+    def send_input(self, session_id: str, text: str, sender_session_id: Optional[str] = None, delivery_mode: str = "sequential") -> tuple[bool, bool]:
         """
         Send text input to a session.
 
@@ -157,11 +157,12 @@ class SessionManagerClient:
             session_id: Target session ID
             text: Text to send to the session's Claude input
             sender_session_id: Optional sender session ID (for metadata)
+            delivery_mode: Delivery mode (sequential, important, urgent)
 
         Returns:
             Tuple of (success, unavailable)
         """
-        payload = {"text": text}
+        payload = {"text": text, "delivery_mode": delivery_mode}
         if sender_session_id:
             payload["sender_session_id"] = sender_session_id
 
@@ -171,3 +172,103 @@ class SessionManagerClient:
             payload
         )
         return success, unavailable
+
+    def spawn_child(
+        self,
+        parent_session_id: str,
+        prompt: str,
+        name: Optional[str] = None,
+        wait: Optional[int] = None,
+        model: Optional[str] = None,
+        working_dir: Optional[str] = None,
+    ) -> Optional[dict]:
+        """
+        Spawn a child agent session.
+
+        Args:
+            parent_session_id: Parent session ID
+            prompt: Initial prompt for the child agent
+            name: Friendly name for the child session
+            wait: Monitor child and notify when complete or idle for N seconds
+            model: Model override (opus, sonnet, haiku)
+            working_dir: Working directory override
+
+        Returns:
+            Dict with session info or None if unavailable
+        """
+        payload = {
+            "parent_session_id": parent_session_id,
+            "prompt": prompt,
+        }
+        if name:
+            payload["name"] = name
+        if wait is not None:
+            payload["wait"] = wait
+        if model:
+            payload["model"] = model
+        if working_dir:
+            payload["working_dir"] = working_dir
+
+        data, success, unavailable = self._request("POST", "/sessions/spawn", payload, timeout=10)
+        if unavailable:
+            return None
+        return data
+
+    def list_children(
+        self,
+        parent_session_id: str,
+        recursive: bool = False,
+        status_filter: Optional[str] = None,
+    ) -> Optional[dict]:
+        """
+        List child sessions.
+
+        Args:
+            parent_session_id: Parent session ID
+            recursive: Include grandchildren
+            status_filter: Filter by status (running, completed, error, all)
+
+        Returns:
+            Dict with children list or None if unavailable
+        """
+        path = f"/sessions/{parent_session_id}/children"
+        params = []
+        if recursive:
+            params.append("recursive=true")
+        if status_filter:
+            params.append(f"status={status_filter}")
+        if params:
+            path += "?" + "&".join(params)
+
+        data, success, unavailable = self._request("GET", path)
+        if unavailable:
+            return None
+        return data if success else {"children": []}
+
+    def kill_session(
+        self,
+        requester_session_id: Optional[str],
+        target_session_id: str,
+    ) -> Optional[dict]:
+        """
+        Kill a session (with parent-child ownership check).
+
+        Args:
+            requester_session_id: Requesting session ID (must be parent)
+            target_session_id: Target session ID to kill
+
+        Returns:
+            Dict with result or None if unavailable
+        """
+        payload = {}
+        if requester_session_id:
+            payload["requester_session_id"] = requester_session_id
+
+        data, success, unavailable = self._request(
+            "POST",
+            f"/sessions/{target_session_id}/kill",
+            payload
+        )
+        if unavailable:
+            return None
+        return data
