@@ -246,30 +246,52 @@ Rarely needed - typically use `sm spawn --wait` which notifies parent automatica
 
 **Syntax:**
 ```bash
-sm send <session-id> "<text>"
+sm send <session-id> "<text>" [--sequential|--important|--urgent]
 ```
 
 **Arguments:**
 - `session-id`: Any session managed by Session Manager (not just your children)
 - `text`: Text to send to the session's Claude input
 
+**Delivery Modes:**
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `--sequential` (default) | Wait for agent to be idle/at prompt, then inject | Normal handoff, safe coordination |
+| `--important` | Inject immediately, queue behind current work | Time-sensitive but not critical |
+| `--urgent` | Interrupt immediately, inject now | Emergency stop, critical correction |
+
+**Default behavior** (`--sequential`): Waits for the agent to finish current work and reach an idle state or input prompt before injecting. Prevents interrupting mid-thought.
+
 **Example:**
 ```bash
-# Parent sends input to child
-$ sm send def456 "Add error handling for network failures"
-Input sent to session def456
+# Normal handoff (waits for idle) - DEFAULT
+$ sm send engineer-1042 "Now implement feature Y"
+Queued for engineer-1042 (will inject when idle)
+
+# Explicit sequential mode
+$ sm send def456 "Add error handling" --sequential
+Queued for def456 (will inject when idle)
+
+# Important (inject immediately, but agent may be busy)
+$ sm send def456 "Consider using async/await pattern" --important
+Input sent to def456
+
+# Urgent (interrupt current work)
+$ sm send engineer-1042 "STOP - you're on the wrong branch!" --urgent
+Input sent to engineer-1042 (interrupted)
 
 # Any agent can send to any other session
 $ sm send 1749a2fe "The database migration is complete, you can proceed"
-Input sent to session 1749a2fe
+Queued for 1749a2fe (will inject when idle)
 ```
 
 **Use Case:**
 Rarely needed. Useful for:
-- Parent answering child's questions
-- Providing additional context mid-task
-- Course-correcting a stuck session
-- Coordinating between parallel agents
+- Parent resuming child with new work (default: wait for idle)
+- Providing additional context mid-task (use `--important`)
+- Emergency course-correction (use `--urgent`)
+- Coordinating between parallel agents (default: wait for idle)
 
 ## Auto-Detection
 
