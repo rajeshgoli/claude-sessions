@@ -266,7 +266,7 @@ class TelegramBot:
             "Commands:\n"
             "/new [path] - Create new session (defaults to fractal-market-simulator)\n"
             "/session - Pick a project and create a session\n"
-            "/follow <session> - Create forum topic for existing session\n"
+            "/follow [session] - Create forum topic for existing session (shows buttons if no args)\n"
             "/list - List active sessions\n"
             "/status - What is Claude doing? (reply to session)\n"
             "/subagents - List spawned subagents (reply to session)\n"
@@ -1040,12 +1040,46 @@ Provide ONLY the summary, no preamble or questions."""
             await update.message.reply_text("Unauthorized.")
             return
 
-        if not context.args:
-            await update.message.reply_text("Usage: /follow <session_id or friendly_name>")
-            return
-
         if not update.effective_chat.is_forum:
             await update.message.reply_text("This command only works in forum groups.")
+            return
+
+        # If no args provided, show inline keyboard with eligible sessions
+        if not context.args:
+            if not self._on_list_sessions:
+                await update.message.reply_text("Session listing not configured.")
+                return
+
+            # Get all sessions
+            sessions = await self._on_list_sessions()
+
+            # Filter for eligible sessions (no telegram_topic_id AND status != stopped)
+            eligible = [
+                s for s in sessions
+                if not s.telegram_topic_id and s.status.value != "stopped"
+            ]
+
+            if not eligible:
+                await update.message.reply_text(
+                    "No eligible sessions to follow.\n"
+                    "All sessions either already have topics or are stopped."
+                )
+                return
+
+            # Create inline keyboard
+            keyboard = []
+            for session in eligible:
+                # Display name shows friendly name if available, otherwise session ID
+                display_name = session.friendly_name or session.id
+                button_text = f"{display_name} [{session.id}]"
+                keyboard.append([
+                    InlineKeyboardButton(button_text, callback_data=f"follow:{session.id}")
+                ])
+
+            await update.message.reply_text(
+                "Select a session to follow:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
             return
 
         identifier = " ".join(context.args)
@@ -1184,6 +1218,72 @@ Provide ONLY the summary, no preamble or questions."""
             logger.error(f"Error creating session: {e}")
             await query.edit_message_text(f"Error: {e}")
 
+    async def _handle_follow_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle follow button press."""
+        query = update.callback_query
+        await query.answer()
+
+        # Extract session_id from callback data
+        callback_data = query.data  # Format: "follow:session_id"
+        _, session_id = callback_data.split(":", 1)
+
+        chat_id = query.message.chat_id
+
+        await query.edit_message_text(f"Creating topic for session [{session_id}]...")
+
+        try:
+            # Get session details
+            if not self._on_session_status:
+                await query.edit_message_text("Session status check not configured.")
+                return
+
+            session = await self._on_session_status(session_id)
+
+            if not session:
+                await query.edit_message_text(f"Session not found: {session_id}")
+                return
+
+            # Check if session already has a topic
+            if session.telegram_topic_id:
+                await query.edit_message_text(
+                    f"Session [{session.id}] already has a topic (ID: {session.telegram_topic_id})"
+                )
+                return
+
+            # Create forum topic for the session
+            topic_name = f"{session.friendly_name or 'session'} [{session.id}]"
+            topic_id = await self.create_forum_topic(chat_id, topic_name)
+
+            if not topic_id:
+                await query.edit_message_text("Failed to create forum topic.")
+                return
+
+            # Register topic -> session mapping
+            self.register_topic_session(chat_id, topic_id, session.id)
+
+            # Send welcome message in the new topic
+            await self.bot.send_message(
+                chat_id=chat_id,
+                message_thread_id=topic_id,
+                text=f"Now following session: {session.name}\n"
+                     f"ID: {session.id}\n"
+                     f"Directory: {session.working_dir}\n\n"
+                     "Send messages here to interact with Claude."
+            )
+
+            # Update session with topic info
+            if self._on_update_topic:
+                await self._on_update_topic(session.id, chat_id, topic_id)
+
+            await query.edit_message_text(
+                f"✓ Created topic for session [{session.id}]\n"
+                f"You can now interact with it in the new topic."
+            )
+
+        except Exception as e:
+            logger.error(f"Error creating topic for session: {e}")
+            await query.edit_message_text(f"Error: {e}")
+
     async def start(self):
         """Start the bot."""
         self.application = (
@@ -1213,6 +1313,9 @@ Provide ONLY the summary, no preamble or questions."""
 
         # Handle button presses for project selection
         self.application.add_handler(CallbackQueryHandler(self._handle_new_project, pattern="^new_project:"))
+
+        # Handle button presses for follow command
+        self.application.add_handler(CallbackQueryHandler(self._handle_follow_callback, pattern="^follow:"))
 
         # Handle regular messages (for replies) - include commands so /clear, /compact, etc can be sent as input
         self.application.add_handler(MessageHandler(filters.TEXT, self._handle_message))
