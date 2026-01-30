@@ -214,6 +214,36 @@ class Notifier:
 
         return "\n".join(lines)
 
+    async def rename_session_topic(
+        self,
+        session: Session,
+        new_name: str,
+    ) -> bool:
+        """
+        Rename the Telegram topic for a session.
+
+        Args:
+            session: Session with telegram_chat_id and telegram_topic_id
+            new_name: New friendly name for the topic
+
+        Returns:
+            True if renamed successfully
+        """
+        if not self.telegram:
+            return False
+
+        if not session.telegram_chat_id or not session.telegram_topic_id:
+            return False
+
+        # Format topic name same way as when created
+        topic_name = f"{new_name} [{session.id}]"
+
+        return await self.telegram.rename_forum_topic(
+            chat_id=session.telegram_chat_id,
+            topic_id=session.telegram_topic_id,
+            name=topic_name,
+        )
+
     async def request_email_notification(
         self,
         session_id: str,

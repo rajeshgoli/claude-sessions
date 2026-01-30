@@ -299,6 +299,9 @@ def create_app(
             app.state.session_manager._save_state()
             # Update tmux status bar
             app.state.session_manager.tmux.set_status_bar(session.tmux_session, friendly_name)
+            # Update Telegram topic name if applicable
+            if session.telegram_topic_id and app.state.notifier:
+                await app.state.notifier.rename_session_topic(session, friendly_name)
 
         return SessionResponse(
             id=session.id,
