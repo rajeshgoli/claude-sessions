@@ -63,6 +63,9 @@ class SendInputRequest(BaseModel):
     sender_session_id: Optional[str] = None  # Optional sender identification
     delivery_mode: str = "sequential"  # sequential, important, urgent
     from_sm_send: bool = False  # True if called from sm send command
+    timeout_seconds: Optional[int] = None  # Drop message if not delivered in time
+    notify_on_delivery: bool = False  # Notify sender when delivered
+    notify_after_seconds: Optional[int] = None  # Notify sender N seconds after delivery
 
 
 class NotifyRequest(BaseModel):
@@ -348,6 +351,9 @@ def create_app(
             sender_session_id=request.sender_session_id,
             delivery_mode=request.delivery_mode,
             from_sm_send=request.from_sm_send,
+            timeout_seconds=request.timeout_seconds,
+            notify_on_delivery=request.notify_on_delivery,
+            notify_after_seconds=request.notify_after_seconds,
         )
 
         if not success:
@@ -356,6 +362,19 @@ def create_app(
         # Update activity in monitor
         if app.state.output_monitor:
             app.state.output_monitor.update_activity(session_id)
+
+        # For queued messages, return queue info
+        if request.delivery_mode == "sequential":
+            queue_mgr = app.state.session_manager.message_queue_manager
+            if queue_mgr and not queue_mgr.is_session_idle(session_id):
+                queue_len = queue_mgr.get_queue_length(session_id)
+                return {
+                    "status": "queued",
+                    "session_id": session_id,
+                    "queue_position": queue_len,
+                    "delivery_mode": request.delivery_mode,
+                    "estimated_delivery": "waiting_for_idle",
+                }
 
         return {"status": "sent", "session_id": session_id}
 
@@ -677,12 +696,17 @@ Provide ONLY the summary, no preamble or questions."""
         # This will be set by the environment variable we pass when launching Claude
         session_manager_id = payload.get("session_manager_id") or payload.get("CLAUDE_SESSION_MANAGER_ID")
 
-        # Read last assistant message from transcript file
+        # Read last assistant message from transcript file (in thread pool to avoid blocking)
         last_message = None
         if transcript_path:
-            try:
-                transcript_file = Path(transcript_path)
-                if transcript_file.exists():
+            import asyncio
+
+            def read_transcript():
+                """Read transcript file synchronously (runs in thread pool)."""
+                try:
+                    transcript_file = Path(transcript_path)
+                    if not transcript_file.exists():
+                        return None
                     # JSONL file - read last lines and find last assistant message
                     lines = transcript_file.read_text().strip().split('\n')
                     for line in reversed(lines):
@@ -697,12 +721,17 @@ Provide ONLY the summary, no preamble or questions."""
                                     if isinstance(item, dict) and item.get("type") == "text":
                                         texts.append(item.get("text", ""))
                                 if texts:
-                                    last_message = "\n".join(texts)
-                                    break
+                                    return "\n".join(texts)
                         except json.JSONDecodeError:
                             continue
+                except Exception as e:
+                    logger.error(f"Error reading transcript: {e}")
+                return None
+
+            try:
+                last_message = await asyncio.to_thread(read_transcript)
             except Exception as e:
-                logger.error(f"Error reading transcript: {e}")
+                logger.error(f"Error reading transcript in thread: {e}")
 
         # Store last message
         if last_message:
@@ -716,6 +745,15 @@ Provide ONLY the summary, no preamble or questions."""
                 logger.warning(f"No session_manager_id in hook - stored as {claude_session_id or 'default'}")
 
         # Handle Stop hook - Claude finished responding
+        # Mark session as idle for message queue delivery
+        if hook_event == "Stop" and session_manager_id:
+            queue_mgr = app.state.session_manager.message_queue_manager if app.state.session_manager else None
+            if queue_mgr:
+                queue_mgr.mark_session_idle(session_manager_id)
+                # Restore any saved user input
+                import asyncio
+                asyncio.create_task(queue_mgr._restore_user_input_after_response(session_manager_id))
+
         if hook_event == "Stop" and last_message:
             # Send immediate notification to Telegram
             if app.state.notifier and app.state.session_manager:
@@ -956,6 +994,49 @@ Provide ONLY the summary, no preamble or questions."""
             return {"error": "Failed to kill session"}
 
         return {"status": "killed", "session_id": target_session_id}
+
+    @app.get("/sessions/{session_id}/send-queue")
+    async def get_send_queue(session_id: str):
+        """Get pending messages for a session."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        session = app.state.session_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        queue_mgr = app.state.session_manager.message_queue_manager
+        if not queue_mgr:
+            return {"session_id": session_id, "is_idle": False, "pending_count": 0, "pending_messages": []}
+
+        return queue_mgr.get_queue_status(session_id)
+
+    @app.post("/scheduler/remind")
+    async def schedule_reminder(
+        session_id: str,
+        delay_seconds: int,
+        message: str,
+    ):
+        """Schedule a self-reminder for a session."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        session = app.state.session_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        queue_mgr = app.state.session_manager.message_queue_manager
+        if not queue_mgr:
+            raise HTTPException(status_code=503, detail="Message queue not configured")
+
+        reminder_id = await queue_mgr.schedule_reminder(session_id, delay_seconds, message)
+
+        return {
+            "status": "scheduled",
+            "reminder_id": reminder_id,
+            "session_id": session_id,
+            "fires_in_seconds": delay_seconds,
+        }
 
     @app.post("/hooks/tool-use")
     async def hook_tool_use(request: Request):

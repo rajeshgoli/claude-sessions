@@ -266,7 +266,9 @@ class TmuxController:
 
     def send_input(self, session_name: str, text: str) -> bool:
         """
-        Send input text to a tmux session.
+        Send input text to a tmux session (SYNCHRONOUS - blocks event loop).
+
+        WARNING: This method blocks for ~0.3 seconds. Use send_input_async() in async contexts.
 
         Args:
             session_name: Target session name
@@ -283,16 +285,80 @@ class TmuxController:
             import shlex
             # Run as shell command with sleep to avoid paste detection
             # Note: -l flag causes issues with Claude Code, so we don't use it
+            # Reduced sleep from 1s to 0.3s to minimize event loop blocking
             escaped_text = shlex.quote(text)
-            cmd = f'tmux send-keys -t {session_name} {escaped_text} && sleep 1 && tmux send-keys -t {session_name} Enter'
+            cmd = f'tmux send-keys -t {session_name} {escaped_text} && sleep 0.3 && tmux send-keys -t {session_name} Enter'
             logger.info(f"Running command: {cmd}")
-            result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+            result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True, timeout=5)
             logger.info(f"Command stdout: {result.stdout}, stderr: {result.stderr}")
             logger.info(f"Sent input to {session_name}: {text[:50]}...")
             return True
 
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to send input: {e.stderr}")
+            return False
+        except subprocess.TimeoutExpired:
+            logger.error(f"Timeout sending input to {session_name}")
+            return False
+
+    async def send_input_async(self, session_name: str, text: str) -> bool:
+        """
+        Send input text to a tmux session (ASYNC - non-blocking).
+
+        Use this in async contexts to avoid blocking the event loop.
+
+        Args:
+            session_name: Target session name
+            text: Text to send (will add Enter at end)
+
+        Returns:
+            True if input sent successfully
+        """
+        if not self.session_exists(session_name):
+            logger.error(f"Session {session_name} does not exist")
+            return False
+
+        try:
+            import shlex
+            escaped_text = shlex.quote(text)
+
+            # Send the text first
+            proc = await asyncio.create_subprocess_exec(
+                'tmux', 'send-keys', '-t', session_name, '--', text,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=5)
+
+            if proc.returncode != 0:
+                stderr = await proc.stderr.read()
+                logger.error(f"Failed to send text: {stderr.decode()}")
+                return False
+
+            # Brief delay to avoid paste detection (non-blocking)
+            await asyncio.sleep(0.3)
+
+            # Send Enter
+            proc = await asyncio.create_subprocess_exec(
+                'tmux', 'send-keys', '-t', session_name, 'Enter',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=5)
+
+            if proc.returncode != 0:
+                stderr = await proc.stderr.read()
+                logger.error(f"Failed to send Enter: {stderr.decode()}")
+                return False
+
+            logger.info(f"Sent input (async) to {session_name}: {text[:50]}...")
+            return True
+
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout sending input to {session_name}")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to send input: {e}")
             return False
 
     def send_key(self, session_name: str, key: str) -> bool:
