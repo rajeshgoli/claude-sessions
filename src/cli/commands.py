@@ -1384,6 +1384,20 @@ def cmd_clear(
     try:
         import shlex
 
+        # Check if session is in "completed" state
+        # If so, we need to wake it up first (send Enter) before /clear will work
+        completion_status = session.get("completion_status")
+        if completion_status == "completed":
+            # Wake up the session by sending Enter
+            subprocess.run(
+                ["tmux", "send-keys", "-t", tmux_session, "Enter"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            # Wait for Claude to wake up
+            time.sleep(1.5)
+
         # First, send ESC to interrupt any ongoing stream
         subprocess.run(
             ["tmux", "send-keys", "-t", tmux_session, "Escape"],
