@@ -5,6 +5,7 @@ import logging
 import shlex
 import sqlite3
 import subprocess
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, List, Callable, Awaitable
@@ -65,49 +66,89 @@ class MessageQueueManager:
         # Notification callback (set by main app)
         self._notify_callback: Optional[Callable] = None
 
+        # Persistent database connection with thread-safety
+        self._db_conn: Optional[sqlite3.Connection] = None
+        self._db_lock = threading.Lock()
+
         # Initialize database
         self._init_db()
 
     def _init_db(self):
-        """Initialize SQLite database schema."""
-        conn = sqlite3.connect(str(self.db_path))
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS message_queue (
-                    id TEXT PRIMARY KEY,
-                    target_session_id TEXT NOT NULL,
-                    sender_session_id TEXT,
-                    sender_name TEXT,
-                    text TEXT NOT NULL,
-                    delivery_mode TEXT DEFAULT 'sequential',
-                    queued_at TIMESTAMP NOT NULL,
-                    timeout_at TIMESTAMP,
-                    notify_on_delivery INTEGER DEFAULT 0,
-                    notify_after_seconds INTEGER,
-                    delivered_at TIMESTAMP
-                )
-            """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_pending
-                ON message_queue(target_session_id, delivered_at)
-                WHERE delivered_at IS NULL
-            """)
-            # Scheduled reminders table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS scheduled_reminders (
-                    id TEXT PRIMARY KEY,
-                    target_session_id TEXT NOT NULL,
-                    message TEXT NOT NULL,
-                    fire_at TIMESTAMP NOT NULL,
-                    task_type TEXT DEFAULT 'reminder',
-                    fired INTEGER DEFAULT 0
-                )
-            """)
-            conn.commit()
-        finally:
-            conn.close()
-        logger.info(f"Message queue database initialized at {self.db_path}")
+        """Initialize SQLite database schema with persistent connection."""
+        # Create persistent connection with thread-safety enabled
+        self._db_conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+
+        # Enable WAL mode for better concurrency
+        self._db_conn.execute("PRAGMA journal_mode=WAL")
+
+        # Create schema
+        cursor = self._db_conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS message_queue (
+                id TEXT PRIMARY KEY,
+                target_session_id TEXT NOT NULL,
+                sender_session_id TEXT,
+                sender_name TEXT,
+                text TEXT NOT NULL,
+                delivery_mode TEXT DEFAULT 'sequential',
+                queued_at TIMESTAMP NOT NULL,
+                timeout_at TIMESTAMP,
+                notify_on_delivery INTEGER DEFAULT 0,
+                notify_after_seconds INTEGER,
+                delivered_at TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_pending
+            ON message_queue(target_session_id, delivered_at)
+            WHERE delivered_at IS NULL
+        """)
+        # Scheduled reminders table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_reminders (
+                id TEXT PRIMARY KEY,
+                target_session_id TEXT NOT NULL,
+                message TEXT NOT NULL,
+                fire_at TIMESTAMP NOT NULL,
+                task_type TEXT DEFAULT 'reminder',
+                fired INTEGER DEFAULT 0
+            )
+        """)
+        self._db_conn.commit()
+        logger.info(f"Message queue database initialized at {self.db_path} (WAL mode enabled)")
+
+    def _execute(self, query: str, params=()) -> sqlite3.Cursor:
+        """
+        Execute a database query with thread-safety.
+
+        Args:
+            query: SQL query string
+            params: Query parameters tuple
+
+        Returns:
+            Cursor object
+        """
+        with self._db_lock:
+            cursor = self._db_conn.cursor()
+            cursor.execute(query, params)
+            self._db_conn.commit()
+            return cursor
+
+    def _execute_query(self, query: str, params=()) -> List:
+        """
+        Execute a SELECT query and return all results.
+
+        Args:
+            query: SQL query string
+            params: Query parameters tuple
+
+        Returns:
+            List of rows
+        """
+        with self._db_lock:
+            cursor = self._db_conn.cursor()
+            cursor.execute(query, params)
+            return cursor.fetchall()
 
     def set_notify_callback(self, callback: Callable):
         """Set callback for delivery notifications."""
@@ -163,6 +204,10 @@ class MessageQueueManager:
         for task in self._scheduled_tasks.values():
             task.cancel()
         self._scheduled_tasks.clear()
+        # Close database connection
+        if self._db_conn:
+            self._db_conn.close()
+            self._db_conn = None
         logger.info("Message queue manager stopped")
 
     # =========================================================================
@@ -244,29 +289,23 @@ class MessageQueueManager:
         )
 
         # Persist to database
-        conn = sqlite3.connect(str(self.db_path))
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO message_queue
-                (id, target_session_id, sender_session_id, sender_name, text,
-                 delivery_mode, queued_at, timeout_at, notify_on_delivery, notify_after_seconds)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                msg.id,
-                msg.target_session_id,
-                msg.sender_session_id,
-                msg.sender_name,
-                msg.text,
-                msg.delivery_mode,
-                msg.queued_at.isoformat(),
-                msg.timeout_at.isoformat() if msg.timeout_at else None,
-                1 if msg.notify_on_delivery else 0,
-                msg.notify_after_seconds,
-            ))
-            conn.commit()
-        finally:
-            conn.close()
+        self._execute("""
+            INSERT INTO message_queue
+            (id, target_session_id, sender_session_id, sender_name, text,
+             delivery_mode, queued_at, timeout_at, notify_on_delivery, notify_after_seconds)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            msg.id,
+            msg.target_session_id,
+            msg.sender_session_id,
+            msg.sender_name,
+            msg.text,
+            msg.delivery_mode,
+            msg.queued_at.isoformat(),
+            msg.timeout_at.isoformat() if msg.timeout_at else None,
+            1 if msg.notify_on_delivery else 0,
+            msg.notify_after_seconds,
+        ))
 
         queue_len = self.get_queue_length(target_session_id)
         logger.info(f"Queued message {msg.id} for {target_session_id} (mode={delivery_mode}, queue={queue_len})")
@@ -297,41 +336,36 @@ class MessageQueueManager:
 
     def get_pending_messages(self, session_id: str) -> List[QueuedMessage]:
         """Get all pending (undelivered) messages for a session."""
-        conn = sqlite3.connect(str(self.db_path))
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, target_session_id, sender_session_id, sender_name, text,
-                       delivery_mode, queued_at, timeout_at, notify_on_delivery,
-                       notify_after_seconds, delivered_at
-                FROM message_queue
-                WHERE target_session_id = ? AND delivered_at IS NULL
-                ORDER BY queued_at ASC
-            """, (session_id,))
+        rows = self._execute_query("""
+            SELECT id, target_session_id, sender_session_id, sender_name, text,
+                   delivery_mode, queued_at, timeout_at, notify_on_delivery,
+                   notify_after_seconds, delivered_at
+            FROM message_queue
+            WHERE target_session_id = ? AND delivered_at IS NULL
+            ORDER BY queued_at ASC
+        """, (session_id,))
 
-            messages = []
-            for row in cursor.fetchall():
-                msg = QueuedMessage(
-                    id=row[0],
-                    target_session_id=row[1],
-                    sender_session_id=row[2],
-                    sender_name=row[3],
-                    text=row[4],
-                    delivery_mode=row[5],
-                    queued_at=datetime.fromisoformat(row[6]),
-                    timeout_at=datetime.fromisoformat(row[7]) if row[7] else None,
-                    notify_on_delivery=bool(row[8]),
-                    notify_after_seconds=row[9],
-                    delivered_at=datetime.fromisoformat(row[10]) if row[10] else None,
-                )
-                # Skip expired messages
-                if msg.timeout_at and datetime.now() > msg.timeout_at:
-                    self._mark_expired(msg.id)
-                    continue
-                messages.append(msg)
-            return messages
-        finally:
-            conn.close()
+        messages = []
+        for row in rows:
+            msg = QueuedMessage(
+                id=row[0],
+                target_session_id=row[1],
+                sender_session_id=row[2],
+                sender_name=row[3],
+                text=row[4],
+                delivery_mode=row[5],
+                queued_at=datetime.fromisoformat(row[6]),
+                timeout_at=datetime.fromisoformat(row[7]) if row[7] else None,
+                notify_on_delivery=bool(row[8]),
+                notify_after_seconds=row[9],
+                delivered_at=datetime.fromisoformat(row[10]) if row[10] else None,
+            )
+            # Skip expired messages
+            if msg.timeout_at and datetime.now() > msg.timeout_at:
+                self._mark_expired(msg.id)
+                continue
+            messages.append(msg)
+        return messages
 
     def get_queue_length(self, session_id: str) -> int:
         """Get the number of pending messages for a session."""
@@ -339,48 +373,30 @@ class MessageQueueManager:
 
     def _mark_delivered(self, message_id: str):
         """Mark a message as delivered in the database."""
-        conn = sqlite3.connect(str(self.db_path))
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                UPDATE message_queue SET delivered_at = ? WHERE id = ?
-            """, (datetime.now().isoformat(), message_id))
-            conn.commit()
-        finally:
-            conn.close()
+        self._execute("""
+            UPDATE message_queue SET delivered_at = ? WHERE id = ?
+        """, (datetime.now().isoformat(), message_id))
 
     def _mark_expired(self, message_id: str):
         """Mark a message as expired (delete it)."""
-        conn = sqlite3.connect(str(self.db_path))
-        try:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM message_queue WHERE id = ?", (message_id,))
-            conn.commit()
-        finally:
-            conn.close()
+        self._execute("DELETE FROM message_queue WHERE id = ?", (message_id,))
         logger.info(f"Message {message_id} expired and deleted")
 
     def _cleanup_messages_for_session(self, session_id: str):
         """Clean up all pending messages for a session that no longer exists."""
-        conn = sqlite3.connect(str(self.db_path))
-        try:
-            cursor = conn.cursor()
-            # First get the count for logging
-            cursor.execute(
-                "SELECT COUNT(*) FROM message_queue WHERE target_session_id = ? AND delivered_at IS NULL",
-                (session_id,)
-            )
-            count = cursor.fetchone()[0]
+        # First get the count for logging
+        rows = self._execute_query(
+            "SELECT COUNT(*) FROM message_queue WHERE target_session_id = ? AND delivered_at IS NULL",
+            (session_id,)
+        )
+        count = rows[0][0] if rows else 0
 
-            # Delete all pending messages for this session
-            cursor.execute(
-                "DELETE FROM message_queue WHERE target_session_id = ? AND delivered_at IS NULL",
-                (session_id,)
-            )
-            conn.commit()
-            logger.info(f"Cleaned up {count} pending message(s) for non-existent session {session_id}")
-        finally:
-            conn.close()
+        # Delete all pending messages for this session
+        self._execute(
+            "DELETE FROM message_queue WHERE target_session_id = ? AND delivered_at IS NULL",
+            (session_id,)
+        )
+        logger.info(f"Cleaned up {count} pending message(s) for non-existent session {session_id}")
 
     # =========================================================================
     # User Input Detection and Management
@@ -473,17 +489,12 @@ class MessageQueueManager:
 
     def _get_sessions_with_pending(self) -> List[str]:
         """Get list of session IDs with pending messages."""
-        conn = sqlite3.connect(str(self.db_path))
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT DISTINCT target_session_id
-                FROM message_queue
-                WHERE delivered_at IS NULL
-            """)
-            return [row[0] for row in cursor.fetchall()]
-        finally:
-            conn.close()
+        rows = self._execute_query("""
+            SELECT DISTINCT target_session_id
+            FROM message_queue
+            WHERE delivered_at IS NULL
+        """)
+        return [row[0] for row in rows]
 
     async def _check_stale_input(self, session_id: str):
         """Check if user input has become stale and trigger delivery."""
@@ -736,16 +747,10 @@ class MessageQueueManager:
         fire_at = datetime.now() + timedelta(seconds=delay_seconds)
 
         # Persist to database
-        conn = sqlite3.connect(str(self.db_path))
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO scheduled_reminders (id, target_session_id, message, fire_at, task_type)
-                VALUES (?, ?, ?, ?, 'reminder')
-            """, (reminder_id, session_id, message, fire_at.isoformat()))
-            conn.commit()
-        finally:
-            conn.close()
+        self._execute("""
+            INSERT INTO scheduled_reminders (id, target_session_id, message, fire_at, task_type)
+            VALUES (?, ?, ?, ?, 'reminder')
+        """, (reminder_id, session_id, message, fire_at.isoformat()))
 
         # Schedule async task
         task = asyncio.create_task(self._fire_reminder(reminder_id, session_id, message, delay_seconds))
@@ -768,16 +773,10 @@ class MessageQueueManager:
             )
 
             # Mark as fired in database
-            conn = sqlite3.connect(str(self.db_path))
-            try:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "UPDATE scheduled_reminders SET fired = 1 WHERE id = ?",
-                    (reminder_id,)
-                )
-                conn.commit()
-            finally:
-                conn.close()
+            self._execute(
+                "UPDATE scheduled_reminders SET fired = 1 WHERE id = ?",
+                (reminder_id,)
+            )
 
             logger.info(f"Reminder {reminder_id} fired for {session_id}")
 
@@ -788,27 +787,22 @@ class MessageQueueManager:
 
     async def _recover_scheduled_reminders(self):
         """Recover unfired reminders on startup."""
-        conn = sqlite3.connect(str(self.db_path))
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, target_session_id, message, fire_at
-                FROM scheduled_reminders
-                WHERE fired = 0 AND fire_at > ?
-            """, (datetime.now().isoformat(),))
+        rows = self._execute_query("""
+            SELECT id, target_session_id, message, fire_at
+            FROM scheduled_reminders
+            WHERE fired = 0 AND fire_at > ?
+        """, (datetime.now().isoformat(),))
 
-            for row in cursor.fetchall():
-                reminder_id, session_id, message, fire_at_str = row
-                fire_at = datetime.fromisoformat(fire_at_str)
-                delay = (fire_at - datetime.now()).total_seconds()
-                if delay > 0:
-                    task = asyncio.create_task(
-                        self._fire_reminder(reminder_id, session_id, message, delay)
-                    )
-                    self._scheduled_tasks[reminder_id] = task
-                    logger.info(f"Recovered reminder {reminder_id}, fires in {delay:.0f}s")
-        finally:
-            conn.close()
+        for row in rows:
+            reminder_id, session_id, message, fire_at_str = row
+            fire_at = datetime.fromisoformat(fire_at_str)
+            delay = (fire_at - datetime.now()).total_seconds()
+            if delay > 0:
+                task = asyncio.create_task(
+                    self._fire_reminder(reminder_id, session_id, message, delay)
+                )
+                self._scheduled_tasks[reminder_id] = task
+                logger.info(f"Recovered reminder {reminder_id}, fires in {delay:.0f}s")
 
     # =========================================================================
     # API Helpers
