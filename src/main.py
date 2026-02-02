@@ -293,7 +293,18 @@ class SessionManagerApp:
             session = self.session_manager.get_session(session_id)
             if not session:
                 return False
-            return self.session_manager.send_key(session_id, "Escape")
+            success = self.session_manager.send_key(session_id, "Escape")
+
+            if success:
+                # After interrupt, Claude won't fire Stop hook
+                # Mark idle after delay to allow message delivery
+                async def mark_idle_after_delay():
+                    await asyncio.sleep(1.0)  # Give Claude time to process interrupt
+                    if self.message_queue:
+                        self.message_queue.mark_session_idle(session_id)
+                asyncio.create_task(mark_idle_after_delay())
+
+            return success
 
         async def on_get_subagents(session_id: str) -> Optional[list]:
             """Get subagents for a session."""
