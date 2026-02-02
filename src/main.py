@@ -179,6 +179,8 @@ class SessionManagerApp:
 
         # Child monitor for --wait functionality
         self.child_monitor = ChildMonitor(self.session_manager)
+        # Pass child monitor to session manager
+        self.session_manager.child_monitor = self.child_monitor
 
         # Message queue manager for reliable inter-agent messaging (sm-send-v2)
         sm_send_config = config.get("sm_send", {})

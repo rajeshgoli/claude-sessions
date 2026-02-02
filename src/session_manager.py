@@ -35,6 +35,9 @@ class SessionManager:
         # Message queue manager (set by main app)
         self.message_queue_manager = None
 
+        # Child monitor (set by main app)
+        self.child_monitor = None
+
         # Load existing sessions from state file
         self._load_state()
 
@@ -261,8 +264,13 @@ class SessionManager:
 
         logger.info(f"Spawned child session {session.name} (id={session.id}, parent={parent_session_id})")
 
-        # TODO: Register background monitoring if wait is specified
-        # This will be implemented in Task #5
+        # Register background monitoring if wait is specified
+        if wait and self.child_monitor:
+            self.child_monitor.register_child(
+                child_session_id=session.id,
+                parent_session_id=parent_session_id,
+                wait_seconds=wait,
+            )
 
         return session
 
