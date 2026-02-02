@@ -110,6 +110,10 @@ class Session:
     tools_used: dict[str, int] = field(default_factory=dict)  # {"Read": 5, "Write": 3}
     last_tool_call: Optional[datetime] = None  # Last tool usage timestamp
 
+    # Lock management fields
+    touched_repos: set[str] = field(default_factory=set)  # Repo roots this session has written to
+    worktrees: list[str] = field(default_factory=list)  # Worktree paths created by this session
+
     def __post_init__(self):
         if not self.name:
             self.name = f"claude-{self.id}"
@@ -147,6 +151,9 @@ class Session:
             "tokens_used": self.tokens_used,
             "tools_used": self.tools_used,
             "last_tool_call": self.last_tool_call.isoformat() if self.last_tool_call else None,
+            # Lock management fields
+            "touched_repos": list(self.touched_repos),
+            "worktrees": self.worktrees,
         }
 
     @classmethod
@@ -183,6 +190,9 @@ class Session:
             tokens_used=data.get("tokens_used", 0),
             tools_used=data.get("tools_used", {}),
             last_tool_call=datetime.fromisoformat(data["last_tool_call"]) if data.get("last_tool_call") else None,
+            # Lock management fields
+            touched_repos=set(data.get("touched_repos", [])),
+            worktrees=data.get("worktrees", []),
         )
 
 
