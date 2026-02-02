@@ -56,15 +56,36 @@ class SessionManager:
                 logger.error(f"Failed to load state: {e}")
 
     def _save_state(self):
-        """Save session state to disk."""
+        """
+        Save session state to disk using atomic file operations.
+
+        Uses temp file + rename to ensure atomic writes and prevent race conditions
+        when multiple async tasks call this method concurrently.
+        """
         try:
             data = {
                 "sessions": [s.to_dict() for s in self.sessions.values()]
             }
-            with open(self.state_file, "w") as f:
+
+            # Write to temporary file first
+            state_path = Path(self.state_file)
+            temp_file = state_path.with_suffix('.tmp')
+
+            with open(temp_file, "w") as f:
                 json.dump(data, f, indent=2)
+
+            # Atomic rename (POSIX guarantees atomicity)
+            temp_file.rename(state_path)
+
         except Exception as e:
             logger.error(f"Failed to save state: {e}")
+            # Clean up temp file if it exists
+            try:
+                temp_file = Path(self.state_file).with_suffix('.tmp')
+                if temp_file.exists():
+                    temp_file.unlink()
+            except Exception:
+                pass
 
     def add_event_handler(self, handler: Callable[[NotificationEvent], Awaitable[None]]):
         """Register a handler for session events."""
