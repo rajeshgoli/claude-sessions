@@ -102,14 +102,17 @@ def sample_session() -> Session:
 
 
 @pytest.fixture
-def test_client() -> TestClient:
+def test_client(session_manager: SessionManager) -> TestClient:
     """
     Create a FastAPI TestClient for testing API endpoints.
 
+    Args:
+        session_manager: SessionManager fixture to inject into app
+
     Returns:
-        TestClient configured with the app
+        TestClient configured with the app and session_manager
     """
-    app = create_app()
+    app = create_app(session_manager=session_manager)
     return TestClient(app)
 
 
