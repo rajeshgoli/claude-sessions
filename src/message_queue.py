@@ -654,6 +654,20 @@ class MessageQueueManager:
             return
 
         try:
+            # If session is completed, wake it up first (like cmd_clear does)
+            if session.completion_status == "completed":
+                logger.info(f"Session {session_id} is completed, sending Enter to wake up")
+                # Send Enter to wake up the completed session
+                proc = await asyncio.create_subprocess_exec(
+                    "tmux", "send-keys", "-t", session.tmux_session, "Enter",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await asyncio.wait_for(proc.communicate(), timeout=2)
+
+                # Wait for Claude to wake up (same as cmd_clear)
+                await asyncio.sleep(1.5)
+
             # Send Escape to interrupt any streaming (async, non-blocking)
             proc = await asyncio.create_subprocess_exec(
                 "tmux", "send-keys", "-t", session.tmux_session, "Escape",
