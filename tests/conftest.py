@@ -114,7 +114,7 @@ def test_client() -> TestClient:
 
 
 @pytest.fixture
-def session_manager(mock_tmux: MagicMock, temp_state_file: Path) -> SessionManager:
+def session_manager(mock_tmux: MagicMock, temp_state_file: Path) -> Generator[SessionManager, None, None]:
     """
     Create a SessionManager instance with mocked dependencies.
 
@@ -122,7 +122,7 @@ def session_manager(mock_tmux: MagicMock, temp_state_file: Path) -> SessionManag
         mock_tmux: Mocked TmuxController
         temp_state_file: Temporary state file
 
-    Returns:
+    Yields:
         SessionManager configured for testing
     """
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -132,4 +132,4 @@ def session_manager(mock_tmux: MagicMock, temp_state_file: Path) -> SessionManag
         )
         # Replace tmux controller with mock
         manager.tmux = mock_tmux
-        return manager
+        yield manager
