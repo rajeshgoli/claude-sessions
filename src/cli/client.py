@@ -156,6 +156,9 @@ class SessionManagerClient:
         sender_session_id: Optional[str] = None,
         delivery_mode: str = "sequential",
         from_sm_send: bool = False,
+        timeout_seconds: Optional[int] = None,
+        notify_on_delivery: bool = False,
+        notify_after_seconds: Optional[int] = None,
     ) -> tuple[bool, bool]:
         """
         Send text input to a session.
@@ -166,6 +169,9 @@ class SessionManagerClient:
             sender_session_id: Optional sender session ID (for metadata)
             delivery_mode: Delivery mode (sequential, important, urgent)
             from_sm_send: True if called from sm send command (triggers notification)
+            timeout_seconds: Drop message if not delivered in this time
+            notify_on_delivery: Notify sender when delivered
+            notify_after_seconds: Notify sender N seconds after delivery
 
         Returns:
             Tuple of (success, unavailable)
@@ -173,6 +179,12 @@ class SessionManagerClient:
         payload = {"text": text, "delivery_mode": delivery_mode, "from_sm_send": from_sm_send}
         if sender_session_id:
             payload["sender_session_id"] = sender_session_id
+        if timeout_seconds is not None:
+            payload["timeout_seconds"] = timeout_seconds
+        if notify_on_delivery:
+            payload["notify_on_delivery"] = notify_on_delivery
+        if notify_after_seconds is not None:
+            payload["notify_after_seconds"] = notify_after_seconds
 
         data, success, unavailable = self._request(
             "POST",
