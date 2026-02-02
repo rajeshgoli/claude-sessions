@@ -13,6 +13,77 @@ LOCK_FILE_NAME = ".claude/workspace.lock"
 STALE_THRESHOLD_MINUTES = 30
 
 
+def get_git_root(file_path: str) -> Optional[str]:
+    """
+    Find git repository root for a file path.
+
+    Args:
+        file_path: Path to a file (may not exist yet)
+
+    Returns:
+        Absolute path to git repo root, or None if not in a git repo
+    """
+    dir_path = Path(file_path).parent
+    if not dir_path.exists():
+        dir_path = dir_path.parent  # File might not exist yet
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=dir_path,
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def is_worktree(repo_root: str) -> bool:
+    """
+    Check if a path is a git worktree (not the main working tree).
+
+    Args:
+        repo_root: Path to check
+
+    Returns:
+        True if path is a worktree, False if main repo or not a git repo
+    """
+    try:
+        # In a worktree, .git is a file pointing to the main repo
+        # In main repo, .git is a directory
+        git_path = Path(repo_root) / ".git"
+        return git_path.is_file()
+    except Exception:
+        return False
+
+
+def has_uncommitted_changes(repo_root: str) -> bool:
+    """
+    Check if a repository has uncommitted changes.
+
+    Args:
+        repo_root: Path to git repository root
+
+    Returns:
+        True if there are uncommitted changes, False otherwise
+    """
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        return bool(result.stdout.strip())
+    except Exception:
+        return False
+
+
 @dataclass
 class LockInfo:
     """Information about a workspace lock."""
@@ -25,6 +96,14 @@ class LockInfo:
         """Check if lock is older than threshold."""
         age = datetime.now() - self.started
         return age > timedelta(minutes=STALE_THRESHOLD_MINUTES)
+
+
+@dataclass
+class LockResult:
+    """Result of trying to acquire a lock."""
+    acquired: bool
+    locked_by_other: bool = False
+    owner_session_id: Optional[str] = None
 
 
 class LockManager:
@@ -57,6 +136,64 @@ class LockManager:
         except Exception as e:
             logger.debug(f"Failed to find git root: {e}")
             return None
+
+    def try_acquire(self, repo_root: str, session_id: str) -> LockResult:
+        """
+        Try to acquire lock on a specific repo root.
+
+        Args:
+            repo_root: Absolute path to git repository root
+            session_id: Session ID attempting to acquire lock
+
+        Returns:
+            LockResult indicating success/failure and lock owner
+        """
+        lock_file = Path(repo_root) / LOCK_FILE_NAME
+
+        # Check if lock exists
+        existing = self._read_lock_file(lock_file)
+
+        # If locked by another session (and not stale), return failure
+        if existing and existing.session_id != session_id and not existing.is_stale():
+            return LockResult(
+                acquired=False,
+                locked_by_other=True,
+                owner_session_id=existing.session_id
+            )
+
+        # Acquire the lock
+        try:
+            lock_file.parent.mkdir(parents=True, exist_ok=True)
+            branch = self._get_current_branch_for_path(repo_root)
+            started = datetime.now().isoformat()
+
+            with open(lock_file, "w") as f:
+                f.write(f"session={session_id}\n")
+                f.write(f"task=auto-acquired\n")
+                f.write(f"branch={branch}\n")
+                f.write(f"started={started}\n")
+
+            logger.info(f"Lock acquired on {repo_root} by session {session_id}")
+            return LockResult(acquired=True, locked_by_other=False)
+        except Exception as e:
+            logger.error(f"Failed to acquire lock on {repo_root}: {e}")
+            return LockResult(acquired=False, locked_by_other=False)
+
+    def _get_current_branch_for_path(self, repo_root: str) -> str:
+        """Get current git branch for a specific repo path."""
+        try:
+            result = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip() or "unknown"
+            return "unknown"
+        except Exception:
+            return "unknown"
 
     def _get_current_branch(self) -> str:
         """Get current git branch."""
@@ -114,49 +251,59 @@ class LockManager:
             logger.error(f"Failed to write lock file: {e}")
             return False
 
-    def release_lock(self, session_id: Optional[str] = None) -> bool:
+    def release_lock(self, repo_root: Optional[str] = None, session_id: Optional[str] = None) -> bool:
         """
         Release a workspace lock.
 
         Args:
+            repo_root: Optional repo root path (if None, uses self.lock_file for backward compatibility)
             session_id: Optional session ID (only releases if it owns the lock)
 
         Returns:
             True if lock released or didn't exist
         """
-        if not self.lock_file or not self.lock_file.exists():
+        # Determine lock file to release
+        if repo_root:
+            lock_file = Path(repo_root) / LOCK_FILE_NAME
+        else:
+            lock_file = self.lock_file
+
+        if not lock_file or not lock_file.exists():
             return True
 
         # If session_id provided, verify ownership
         if session_id:
-            existing_lock = self.check_lock()
+            existing_lock = self._read_lock_file(lock_file)
             if existing_lock and existing_lock.session_id != session_id:
                 logger.warning(
-                    f"Lock held by {existing_lock.session_id}, "
+                    f"Lock on {repo_root or 'workspace'} held by {existing_lock.session_id}, "
                     f"not releasing for {session_id}"
                 )
                 return False
 
         try:
-            self.lock_file.unlink()
-            logger.info("Lock released")
+            lock_file.unlink()
+            logger.info(f"Lock released on {repo_root or 'workspace'}")
             return True
         except Exception as e:
-            logger.error(f"Failed to release lock: {e}")
+            logger.error(f"Failed to release lock on {repo_root or 'workspace'}: {e}")
             return False
 
-    def check_lock(self) -> Optional[LockInfo]:
+    def _read_lock_file(self, lock_file: Path) -> Optional[LockInfo]:
         """
-        Check if a lock exists.
+        Read lock info from a specific lock file.
+
+        Args:
+            lock_file: Path to lock file
 
         Returns:
-            LockInfo if lock exists, None otherwise
+            LockInfo if lock exists and is valid, None otherwise
         """
-        if not self.lock_file or not self.lock_file.exists():
+        if not lock_file.exists():
             return None
 
         try:
-            with open(self.lock_file) as f:
+            with open(lock_file) as f:
                 lines = f.readlines()
 
             lock_data = {}
@@ -167,7 +314,7 @@ class LockManager:
                     lock_data[key] = value
 
             if not all(k in lock_data for k in ["session", "task", "branch", "started"]):
-                logger.warning("Invalid lock file format")
+                logger.warning(f"Invalid lock file format: {lock_file}")
                 return None
 
             return LockInfo(
@@ -177,8 +324,19 @@ class LockManager:
                 started=datetime.fromisoformat(lock_data["started"]),
             )
         except Exception as e:
-            logger.error(f"Failed to read lock file: {e}")
+            logger.error(f"Failed to read lock file {lock_file}: {e}")
             return None
+
+    def check_lock(self) -> Optional[LockInfo]:
+        """
+        Check if a lock exists (for backward compatibility).
+
+        Returns:
+            LockInfo if lock exists, None otherwise
+        """
+        if not self.lock_file:
+            return None
+        return self._read_lock_file(self.lock_file)
 
     def is_locked(self) -> bool:
         """

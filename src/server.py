@@ -768,6 +768,46 @@ Provide ONLY the summary, no preamble or questions."""
                 import asyncio
                 asyncio.create_task(queue_mgr._restore_user_input_after_response(session_manager_id))
 
+            # Auto-release locks and check for cleanup
+            if app.state.session_manager:
+                session = app.state.session_manager.get_session(session_manager_id)
+                if session:
+                    # Import lock manager functions
+                    from .lock_manager import LockManager, is_worktree, has_uncommitted_changes
+
+                    # Release all locks (silent)
+                    for repo_root in session.touched_repos:
+                        lock_mgr = LockManager(working_dir=repo_root)
+                        lock_mgr.release_lock(repo_root, session_manager_id)
+                        logger.info(f"Released lock on {repo_root} for session {session_manager_id}")
+
+                    # Check for worktrees with uncommitted changes
+                    cleanup_needed = []
+                    for repo_root in session.touched_repos:
+                        if is_worktree(repo_root) and has_uncommitted_changes(repo_root):
+                            cleanup_needed.append(repo_root)
+
+                    # Inject cleanup prompt if needed
+                    if cleanup_needed:
+                        paths_str = "\n".join(f"  - {p}" for p in cleanup_needed)
+                        cleanup_prompt = f"""You have uncommitted changes in worktree(s):
+{paths_str}
+
+Please choose:
+1. Push to branch and create PR: git push -u origin HEAD && gh pr create
+2. Push branch only: git push -u origin HEAD
+3. Abandon changes: git worktree remove <path>
+
+Or continue working if not done yet."""
+
+                        # Send cleanup prompt to session
+                        await app.state.session_manager.send_input(
+                            session_manager_id,
+                            cleanup_prompt,
+                            delivery_mode="important"
+                        )
+                        logger.info(f"Sent cleanup prompt for {len(cleanup_needed)} worktree(s)")
+
         if hook_event == "Stop" and last_message:
             # Send immediate notification to Telegram
             if app.state.notifier and app.state.session_manager:
@@ -1082,6 +1122,66 @@ Provide ONLY the summary, no preamble or questions."""
         session = None
         if session_manager_id and app.state.session_manager:
             session = app.state.session_manager.get_session(session_manager_id)
+
+        # Auto-acquire lock on file write (PreToolUse for Edit/Write/NotebookEdit)
+        if hook_type == "PreToolUse" and tool_name in ("Edit", "Write", "NotebookEdit"):
+            file_path = tool_input.get("file_path", "")
+
+            if file_path:
+                # Resolve to absolute path
+                if file_path.startswith("/"):
+                    abs_path = file_path
+                else:
+                    abs_path = str(Path(cwd) / file_path) if cwd else file_path
+
+                # Import lock manager functions
+                from .lock_manager import get_git_root, LockManager
+
+                # Find git repo root for this file
+                repo_root = get_git_root(abs_path)
+
+                if repo_root:
+                    # Try to acquire lock
+                    lock_mgr = LockManager(working_dir=repo_root)
+                    lock_result = lock_mgr.try_acquire(repo_root, session_manager_id)
+
+                    if lock_result.locked_by_other:
+                        # Get the other session's friendly name
+                        other_session = None
+                        if app.state.session_manager:
+                            other_session = app.state.session_manager.get_session(lock_result.owner_session_id)
+
+                        other_name = other_session.friendly_name if other_session and other_session.friendly_name else lock_result.owner_session_id
+
+                        return {
+                            "status": "error",
+                            "error": f"⚠️  {repo_root} is locked by session [{other_name}].\n\n"
+                                     f"Work in a separate worktree:\n"
+                                     f"  git worktree add ../my-feature feature-branch\n"
+                                     f"  Then edit ../my-feature/{Path(abs_path).relative_to(repo_root)}"
+                        }
+
+                    # Lock acquired - track this repo
+                    if session:
+                        session.touched_repos.add(repo_root)
+                        app.state.session_manager._save_state()
+
+        # Track worktree creation (PreToolUse for Bash)
+        if hook_type == "PreToolUse" and tool_name == "Bash" and session:
+            command = tool_input.get("command", "")
+
+            # Detect worktree creation
+            if "git worktree add" in command:
+                import re
+                # Parse: git worktree add <path> [<branch>]
+                match = re.search(r'git\s+worktree\s+add\s+([^\s]+)', command)
+                if match:
+                    worktree_path = match.group(1)
+                    # Resolve to absolute path
+                    abs_worktree = str((Path(cwd) / worktree_path).resolve()) if cwd else worktree_path
+                    session.worktrees.append(abs_worktree)
+                    app.state.session_manager._save_state()
+                    logger.info(f"Tracked worktree creation: {abs_worktree}")
 
         # Log to database (fire and forget - don't block response)
         if hasattr(app.state, 'tool_logger') and app.state.tool_logger:
