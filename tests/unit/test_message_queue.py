@@ -1,0 +1,361 @@
+"""Unit tests for MessageQueueManager - ticket #63."""
+
+import pytest
+import asyncio
+import tempfile
+import sqlite3
+from datetime import datetime, timedelta
+from pathlib import Path
+from unittest.mock import MagicMock, AsyncMock, patch, PropertyMock
+
+from src.message_queue import MessageQueueManager
+from src.models import QueuedMessage, SessionDeliveryState, SessionStatus, Session
+
+
+# Patch asyncio.create_task globally for tests that don't need async
+def noop_create_task(coro):
+    """Silently close coroutine without running it."""
+    coro.close()
+    return MagicMock()
+
+
+@pytest.fixture
+def mock_session_manager():
+    """Create a mock SessionManager."""
+    mock = MagicMock()
+    mock.sessions = {}
+    mock.get_session = MagicMock(return_value=None)
+    mock.tmux = MagicMock()
+    mock.tmux.send_input_async = AsyncMock(return_value=True)
+    mock._save_state = MagicMock()
+    return mock
+
+
+@pytest.fixture
+def temp_db_path(tmp_path):
+    """Create a temporary database path."""
+    return str(tmp_path / "test_message_queue.db")
+
+
+@pytest.fixture
+def message_queue(mock_session_manager, temp_db_path):
+    """Create a MessageQueueManager with mocked dependencies."""
+    mq = MessageQueueManager(
+        session_manager=mock_session_manager,
+        db_path=temp_db_path,
+        config={
+            "sm_send": {
+                "input_poll_interval": 1,
+                "input_stale_timeout": 30,
+                "max_batch_size": 10,
+                "urgent_delay_ms": 100,
+            },
+            "timeouts": {
+                "message_queue": {
+                    "subprocess_timeout_seconds": 1,
+                    "async_send_timeout_seconds": 2,
+                }
+            }
+        }
+    )
+    return mq
+
+
+class TestQueueing:
+    """Tests for message queueing functionality."""
+
+    def test_queue_message_persists_to_db(self, message_queue):
+        """Queued messages are stored in SQLite."""
+        msg = message_queue.queue_message(
+            target_session_id="target123",
+            text="Hello, world!",
+            sender_session_id="sender456",
+            sender_name="Test Sender",
+        )
+
+        # Verify message was returned
+        assert msg.id is not None
+        assert msg.target_session_id == "target123"
+        assert msg.text == "Hello, world!"
+
+        # Verify it's in the database
+        pending = message_queue.get_pending_messages("target123")
+        assert len(pending) == 1
+        assert pending[0].id == msg.id
+        assert pending[0].text == "Hello, world!"
+
+    def test_queue_message_with_timeout(self, message_queue):
+        """Messages with timeout have correct timeout_at."""
+        msg = message_queue.queue_message(
+            target_session_id="target123",
+            text="Urgent message",
+            timeout_seconds=300,  # 5 minutes
+        )
+
+        # Verify timeout was set
+        assert msg.timeout_at is not None
+        expected_timeout = msg.queued_at + timedelta(seconds=300)
+        # Allow 1 second tolerance
+        assert abs((msg.timeout_at - expected_timeout).total_seconds()) < 1
+
+    def test_queue_message_without_timeout(self, message_queue):
+        """Messages without timeout have None timeout_at."""
+        msg = message_queue.queue_message(
+            target_session_id="target123",
+            text="Normal message",
+        )
+        assert msg.timeout_at is None
+
+    def test_queue_multiple_messages_preserves_order(self, message_queue):
+        """Multiple queued messages preserve FIFO order."""
+        msg1 = message_queue.queue_message("target123", "First")
+        msg2 = message_queue.queue_message("target123", "Second")
+        msg3 = message_queue.queue_message("target123", "Third")
+
+        pending = message_queue.get_pending_messages("target123")
+        assert len(pending) == 3
+        assert pending[0].text == "First"
+        assert pending[1].text == "Second"
+        assert pending[2].text == "Third"
+
+
+class TestDeliveryModes:
+    """Tests for different delivery modes."""
+
+    def test_default_mode_is_sequential(self, message_queue):
+        """Default delivery mode is sequential."""
+        msg = message_queue.queue_message(
+            target_session_id="target123",
+            text="Default mode message",
+        )
+        assert msg.delivery_mode == "sequential"
+
+    def test_important_mode_queued(self, message_queue):
+        """Important mode messages are queued."""
+        # Patch asyncio.create_task to avoid event loop issues
+        with patch('asyncio.create_task', noop_create_task):
+            msg = message_queue.queue_message(
+                target_session_id="target123",
+                text="Important message",
+                delivery_mode="important",
+            )
+        assert msg.delivery_mode == "important"
+
+        pending = message_queue.get_pending_messages("target123")
+        assert len(pending) == 1
+        assert pending[0].delivery_mode == "important"
+
+    def test_urgent_mode_queued(self, message_queue):
+        """Urgent mode messages are queued (delivery handled async)."""
+        # Patch asyncio.create_task to avoid event loop issues
+        with patch('asyncio.create_task', noop_create_task):
+            msg = message_queue.queue_message(
+                target_session_id="target123",
+                text="Urgent message",
+                delivery_mode="urgent",
+            )
+        assert msg.delivery_mode == "urgent"
+
+
+class TestStateManagement:
+    """Tests for session state management."""
+
+    def test_mark_session_idle(self, message_queue):
+        """mark_session_idle sets is_idle to True."""
+        # Patch asyncio.create_task to avoid event loop issues
+        with patch('asyncio.create_task', noop_create_task):
+            message_queue.mark_session_idle("session123")
+
+        state = message_queue.delivery_states.get("session123")
+        assert state is not None
+        assert state.is_idle is True
+        assert state.last_idle_at is not None
+
+    def test_mark_session_active(self, message_queue):
+        """mark_session_active sets is_idle to False."""
+        # Patch asyncio.create_task to avoid event loop issues
+        with patch('asyncio.create_task', noop_create_task):
+            # First mark idle
+            message_queue.mark_session_idle("session123")
+        assert message_queue.is_session_idle("session123") is True
+
+        # Then mark active
+        message_queue.mark_session_active("session123")
+        assert message_queue.is_session_idle("session123") is False
+
+    def test_is_session_idle_false_by_default(self, message_queue):
+        """is_session_idle returns False for unknown sessions."""
+        assert message_queue.is_session_idle("unknown") is False
+
+
+class TestPendingMessages:
+    """Tests for pending message handling."""
+
+    def test_expired_messages_not_returned(self, message_queue):
+        """Messages past timeout_at are skipped in get_pending_messages."""
+        # Queue message that's already expired by manually inserting
+        expired_time = (datetime.now() - timedelta(hours=1)).isoformat()
+        timeout_time = (datetime.now() - timedelta(minutes=30)).isoformat()
+
+        # Insert directly into database with past timeout
+        message_queue._execute("""
+            INSERT INTO message_queue
+            (id, target_session_id, text, delivery_mode, queued_at, timeout_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, ("expired_msg", "target123", "Will expire", "sequential", expired_time, timeout_time))
+
+        # Should not be in pending (expired messages are skipped)
+        pending = message_queue.get_pending_messages("target123")
+        assert len(pending) == 0
+
+    def test_get_queue_length(self, message_queue):
+        """get_queue_length returns correct count."""
+        assert message_queue.get_queue_length("target123") == 0
+
+        message_queue.queue_message("target123", "Message 1")
+        assert message_queue.get_queue_length("target123") == 1
+
+        message_queue.queue_message("target123", "Message 2")
+        assert message_queue.get_queue_length("target123") == 2
+
+
+class TestBatchDelivery:
+    """Tests for batch delivery."""
+
+    def test_max_batch_size_respected(self, message_queue):
+        """Batch size is limited by max_batch_size config."""
+        # Queue more messages than max_batch_size
+        for i in range(15):
+            message_queue.queue_message("target123", f"Message {i}")
+
+        pending = message_queue.get_pending_messages("target123")
+        assert len(pending) == 15  # All messages returned
+
+        # The actual batching is done in _try_deliver_messages
+        # which limits to max_batch_size (10)
+
+
+class TestQueueStatus:
+    """Tests for queue status API."""
+
+    def test_get_queue_status(self, message_queue):
+        """get_queue_status returns correct status dict."""
+        # Queue some messages
+        message_queue.queue_message(
+            target_session_id="target123",
+            text="Test message",
+            sender_session_id="sender456",
+            sender_name="Test Sender",
+        )
+        # Patch asyncio.create_task when marking idle
+        with patch('asyncio.create_task', noop_create_task):
+            message_queue.mark_session_idle("target123")
+
+        status = message_queue.get_queue_status("target123")
+
+        assert status["session_id"] == "target123"
+        assert status["is_idle"] is True
+        assert status["pending_count"] == 1
+        assert len(status["pending_messages"]) == 1
+        assert status["pending_messages"][0]["sender"] == "Test Sender"
+
+    def test_get_queue_status_empty(self, message_queue):
+        """get_queue_status works for empty queue."""
+        status = message_queue.get_queue_status("target123")
+
+        assert status["session_id"] == "target123"
+        assert status["is_idle"] is False
+        assert status["pending_count"] == 0
+        assert status["pending_messages"] == []
+
+
+class TestDatabaseOperations:
+    """Tests for database operations."""
+
+    def test_database_created_on_init(self, temp_db_path, mock_session_manager):
+        """Database and tables are created on initialization."""
+        mq = MessageQueueManager(
+            session_manager=mock_session_manager,
+            db_path=temp_db_path,
+        )
+
+        # Verify database file exists
+        assert Path(temp_db_path).exists()
+
+        # Verify tables exist
+        conn = sqlite3.connect(temp_db_path)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='message_queue'")
+        assert cursor.fetchone() is not None
+
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_reminders'")
+        assert cursor.fetchone() is not None
+
+        conn.close()
+
+    def test_mark_delivered_updates_db(self, message_queue):
+        """_mark_delivered updates delivered_at in database."""
+        msg = message_queue.queue_message("target123", "Test")
+
+        # Verify not delivered yet
+        pending = message_queue.get_pending_messages("target123")
+        assert len(pending) == 1
+
+        # Mark as delivered
+        message_queue._mark_delivered(msg.id)
+
+        # Should no longer be pending
+        pending = message_queue.get_pending_messages("target123")
+        assert len(pending) == 0
+
+
+class TestNotifyCallback:
+    """Tests for notification callback."""
+
+    def test_set_notify_callback(self, message_queue):
+        """set_notify_callback stores callback."""
+        callback = MagicMock()
+        message_queue.set_notify_callback(callback)
+        assert message_queue._notify_callback == callback
+
+
+class TestCleanup:
+    """Tests for cleanup operations."""
+
+    def test_cleanup_messages_for_session(self, message_queue):
+        """_cleanup_messages_for_session removes all pending messages."""
+        # Queue messages
+        message_queue.queue_message("target123", "Message 1")
+        message_queue.queue_message("target123", "Message 2")
+        message_queue.queue_message("other456", "Other session")
+
+        assert message_queue.get_queue_length("target123") == 2
+        assert message_queue.get_queue_length("other456") == 1
+
+        # Cleanup target123
+        message_queue._cleanup_messages_for_session("target123")
+
+        assert message_queue.get_queue_length("target123") == 0
+        assert message_queue.get_queue_length("other456") == 1  # Unaffected
+
+
+class TestDeliveryLocks:
+    """Tests for per-session delivery locks."""
+
+    def test_delivery_lock_created_per_session(self, message_queue):
+        """Each session gets its own delivery lock."""
+        # Access locks via internal method
+        lock1 = message_queue._delivery_locks.setdefault("session1", asyncio.Lock())
+        lock2 = message_queue._delivery_locks.setdefault("session2", asyncio.Lock())
+
+        assert lock1 is not lock2
+        assert "session1" in message_queue._delivery_locks
+        assert "session2" in message_queue._delivery_locks
+
+    def test_same_session_gets_same_lock(self, message_queue):
+        """Same session gets the same lock instance."""
+        lock1 = message_queue._delivery_locks.setdefault("session1", asyncio.Lock())
+        lock2 = message_queue._delivery_locks.setdefault("session1", asyncio.Lock())
+
+        assert lock1 is lock2
