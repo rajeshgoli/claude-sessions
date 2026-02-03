@@ -13,9 +13,20 @@ logger = logging.getLogger(__name__)
 class TmuxController:
     """Controls tmux sessions for Claude Code."""
 
-    def __init__(self, log_dir: str = "/tmp/claude-sessions"):
+    def __init__(self, log_dir: str = "/tmp/claude-sessions", config: Optional[dict] = None):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.config = config or {}
+
+        # Load timeout configuration with fallbacks
+        timeouts = self.config.get("timeouts", {})
+        tmux_timeouts = timeouts.get("tmux", {})
+
+        self.shell_export_settle_seconds = tmux_timeouts.get("shell_export_settle_seconds", 0.1)
+        self.claude_init_seconds = tmux_timeouts.get("claude_init_seconds", 3)
+        self.claude_init_no_prompt_seconds = tmux_timeouts.get("claude_init_no_prompt_seconds", 1)
+        self.send_keys_timeout_seconds = tmux_timeouts.get("send_keys_timeout_seconds", 5)
+        self.send_keys_settle_seconds = tmux_timeouts.get("send_keys_settle_seconds", 0.3)
 
     def _run_tmux(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
         """Run a tmux command."""
@@ -128,7 +139,7 @@ class TmuxController:
 
             # Small delay to ensure exports complete
             import time
-            time.sleep(0.1)
+            time.sleep(self.shell_export_settle_seconds)
 
             # Start Claude Code in the session
             self._run_tmux(
@@ -222,7 +233,7 @@ class TmuxController:
 
             # Small delay to ensure exports complete
             import time
-            time.sleep(0.1)
+            time.sleep(self.shell_export_settle_seconds)
 
             # Build Claude command with args and model
             cmd_parts = [command]
@@ -245,7 +256,7 @@ class TmuxController:
                 # Wait longer for Claude to fully initialize and be ready to accept input
                 # Claude Code can take 2-3 seconds to start up and show the prompt
                 import time
-                time.sleep(3)
+                time.sleep(self.claude_init_seconds)
                 # Send the prompt using subprocess with list arguments (security: prevent shell injection)
                 subprocess.run(
                     ["tmux", "send-keys", "-t", session_name, "--", initial_prompt],
@@ -253,7 +264,7 @@ class TmuxController:
                     capture_output=True,
                     text=True
                 )
-                time.sleep(1)
+                time.sleep(self.claude_init_no_prompt_seconds)
                 subprocess.run(
                     ["tmux", "send-keys", "-t", session_name, "Enter"],
                     check=True,
@@ -264,7 +275,7 @@ class TmuxController:
             else:
                 # Still wait for Claude to start even without initial prompt
                 import time
-                time.sleep(1)
+                time.sleep(self.claude_init_no_prompt_seconds)
 
             logger.info(f"Created child session {session_name} (id={session_id}) with command {' '.join(cmd_parts)}")
             return True
@@ -294,21 +305,21 @@ class TmuxController:
             import time
             # Use subprocess with list arguments to prevent shell injection
             # Note: -l flag causes issues with Claude Code, so we don't use it
-            # Sleep 0.3s between send-keys calls to avoid paste detection
+            # Small delay between send-keys calls to avoid paste detection
             subprocess.run(
                 ["tmux", "send-keys", "-t", session_name, "--", text],
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=self.send_keys_timeout_seconds
             )
-            time.sleep(0.3)
+            time.sleep(self.send_keys_settle_seconds)
             subprocess.run(
                 ["tmux", "send-keys", "-t", session_name, "Enter"],
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=self.send_keys_timeout_seconds
             )
             logger.info(f"Sent input to {session_name}: {text[:50]}...")
             return True
@@ -347,7 +358,7 @@ class TmuxController:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await asyncio.wait_for(proc.wait(), timeout=5)
+            await asyncio.wait_for(proc.wait(), timeout=self.send_keys_timeout_seconds)
 
             if proc.returncode != 0:
                 stderr = await proc.stderr.read()
@@ -355,7 +366,7 @@ class TmuxController:
                 return False
 
             # Brief delay to avoid paste detection (non-blocking)
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(self.send_keys_settle_seconds)
 
             # Send Enter
             proc = await asyncio.create_subprocess_exec(
@@ -363,7 +374,7 @@ class TmuxController:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await asyncio.wait_for(proc.wait(), timeout=5)
+            await asyncio.wait_for(proc.wait(), timeout=self.send_keys_timeout_seconds)
 
             if proc.returncode != 0:
                 stderr = await proc.stderr.read()

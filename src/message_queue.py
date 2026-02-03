@@ -45,12 +45,22 @@ class MessageQueueManager:
         self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Configuration
+        # Configuration - full config with sm_send section
         config = config or {}
-        self.input_poll_interval = config.get("input_poll_interval", 5)  # seconds
-        self.input_stale_timeout = config.get("input_stale_timeout", 120)  # seconds
-        self.max_batch_size = config.get("max_batch_size", 10)
-        self.urgent_delay_ms = config.get("urgent_delay_ms", 500)
+        sm_send_config = config.get("sm_send", {})
+        self.input_poll_interval = sm_send_config.get("input_poll_interval", 5)  # seconds
+        self.input_stale_timeout = sm_send_config.get("input_stale_timeout", 120)  # seconds
+        self.max_batch_size = sm_send_config.get("max_batch_size", 10)
+        self.urgent_delay_ms = sm_send_config.get("urgent_delay_ms", 500)
+
+        # Load timeout configuration with fallbacks
+        timeouts = config.get("timeouts", {})
+        mq_timeouts = timeouts.get("message_queue", {})
+        self.subprocess_timeout = mq_timeouts.get("subprocess_timeout_seconds", 2)
+        self.async_send_timeout = mq_timeouts.get("async_send_timeout_seconds", 5)
+        self.initial_retry_delay = mq_timeouts.get("initial_retry_delay_seconds", 1.0)
+        self.max_retry_delay = mq_timeouts.get("max_retry_delay_seconds", 30)
+        self.watch_poll_interval = mq_timeouts.get("watch_poll_interval_seconds", 2)
 
         # In-memory state (not persisted - rebuilt from hooks)
         self.delivery_states: Dict[str, SessionDeliveryState] = {}
@@ -414,7 +424,7 @@ class MessageQueueManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=self.subprocess_timeout)
 
             if proc.returncode != 0:
                 return None
@@ -446,7 +456,7 @@ class MessageQueueManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await asyncio.wait_for(proc.communicate(), timeout=2)
+            await asyncio.wait_for(proc.communicate(), timeout=self.subprocess_timeout)
             return proc.returncode == 0
         except Exception as e:
             logger.error(f"Error clearing user input: {e}")
@@ -461,7 +471,7 @@ class MessageQueueManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await asyncio.wait_for(proc.communicate(), timeout=5)
+            await asyncio.wait_for(proc.communicate(), timeout=self.async_send_timeout)
             if proc.returncode == 0:
                 logger.info(f"Restored user input: {text[:50]}...")
         except Exception as e:
@@ -479,7 +489,7 @@ class MessageQueueManager:
         """
         retry_count = 0
         max_retries = 5
-        retry_delay = 1.0
+        retry_delay = self.initial_retry_delay
 
         while self._running:
             try:
@@ -504,7 +514,7 @@ class MessageQueueManager:
                     )
                     logger.warning(f"Restarting monitor loop in {retry_delay}s...")
                     await asyncio.sleep(retry_delay)
-                    retry_delay = min(retry_delay * 2, 30)  # Exponential backoff, max 30s
+                    retry_delay = min(retry_delay * 2, self.max_retry_delay)  # Exponential backoff
                 else:
                     logger.error(
                         f"CRITICAL: Monitor loop failed {max_retries} times, giving up: {e}",
@@ -664,7 +674,7 @@ class MessageQueueManager:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                await asyncio.wait_for(proc.communicate(), timeout=2)
+                await asyncio.wait_for(proc.communicate(), timeout=self.subprocess_timeout)
 
                 # Wait for Claude to wake up (same as cmd_clear)
                 await asyncio.sleep(1.5)
@@ -675,7 +685,7 @@ class MessageQueueManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await asyncio.wait_for(proc.communicate(), timeout=2)
+            await asyncio.wait_for(proc.communicate(), timeout=self.subprocess_timeout)
 
             # Brief delay for interrupt to process
             await asyncio.sleep(self.urgent_delay_ms / 1000)
@@ -889,7 +899,7 @@ class MessageQueueManager:
         """Watch a session and notify when it goes idle or timeout."""
         try:
             start_time = datetime.now()
-            poll_interval = 2  # Check every 2 seconds
+            poll_interval = self.watch_poll_interval
             elapsed = 0
 
             while elapsed < timeout_seconds:

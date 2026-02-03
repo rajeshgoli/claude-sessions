@@ -139,6 +139,7 @@ class SessionManagerApp:
             notify_permission_prompts=notify_config.get("permission_prompts", True),
             notify_completion=notify_config.get("completion", False),
             notify_idle=notify_config.get("idle", True),
+            config=config,  # Pass full config for timeout settings
         )
 
         # Email handler (uses existing harness)
@@ -187,7 +188,7 @@ class SessionManagerApp:
         self.message_queue = MessageQueueManager(
             self.session_manager,
             db_path=sm_send_config.get("db_path", "~/.local/share/claude-sessions/message_queue.db"),
-            config=sm_send_config,
+            config=config,  # Pass full config for timeout settings
         )
         # Pass message queue to session manager
         self.session_manager.message_queue_manager = self.message_queue
@@ -203,6 +204,7 @@ class SessionManagerApp:
             notifier=self.notifier,
             output_monitor=self.output_monitor,
             child_monitor=self.child_monitor,
+            config=config,  # Pass config for server timeout settings
         )
 
         # Attach tool logger to app state

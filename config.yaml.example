@@ -21,6 +21,80 @@ monitor:
     completion: false          # Notify when task appears complete
     idle: true                 # Notify when session is idle
 
+# Timeout and delay configuration (all values in seconds unless specified)
+timeouts:
+  # Tmux session creation and interaction timeouts
+  tmux:
+    # Time to wait for shell exports to complete before starting Claude
+    # Must be long enough for bashrc/zshrc to finish setting env vars
+    shell_export_settle_seconds: 0.1
+
+    # Time for Claude Code to initialize and show first prompt
+    # Based on observed startup time of 2-3 seconds on typical hardware
+    claude_init_seconds: 3
+
+    # Shorter wait when no initial prompt is provided
+    # Claude starts faster without processing a prompt
+    claude_init_no_prompt_seconds: 1
+
+    # Maximum time to wait for tmux send-keys to complete
+    # Allows for shell processing and Claude response time
+    send_keys_timeout_seconds: 5
+
+    # Small delay after sending keys to ensure they're processed
+    # Prevents race conditions with rapid consecutive commands
+    send_keys_settle_seconds: 0.3
+
+  # Output monitor timing configuration
+  output_monitor:
+    # Don't send idle notifications within this time after Claude responds
+    # Prevents "idle" notification immediately after completion
+    # Set to 5 minutes to avoid noise
+    idle_cooldown_seconds: 300
+
+    # Debounce permission prompts - don't notify twice within this window
+    # Prevents duplicate notifications for the same permission request
+    permission_debounce_seconds: 30
+
+  # Message queue processing timeouts
+  message_queue:
+    # Timeout for subprocess calls (tmux send-keys, etc)
+    # Must be long enough for command to execute but not hang forever
+    subprocess_timeout_seconds: 2
+
+    # Longer timeout for async send operations
+    # Allows for Claude to process and respond
+    async_send_timeout_seconds: 5
+
+    # Initial retry delay for failed deliveries (seconds)
+    # Doubles on each retry up to max_retry_delay_seconds
+    initial_retry_delay_seconds: 1.0
+
+    # Maximum retry delay (exponential backoff cap)
+    max_retry_delay_seconds: 30
+
+    # Poll interval for watch_session idle detection
+    # Checks target session status every N seconds
+    watch_poll_interval_seconds: 2
+
+  # Server logging and request handling
+  server:
+    # Log requests that take longer than this (seconds)
+    # Helps identify slow endpoints
+    slow_request_threshold_seconds: 1.0
+
+    # Log detailed timing for requests faster than slow threshold
+    # but slower than this value (seconds)
+    request_timing_threshold_seconds: 0.1
+
+    # Log warning if PreToolUse hook takes longer than this
+    # Indicates lock contention or slow file operations
+    hook_timing_threshold_seconds: 0.05
+
+    # Maximum time to wait for AI summary generation
+    # Summary uses Claude API which can be slow
+    summary_generation_timeout_seconds: 60
+
 telegram:
   # Bot token from @BotFather (required for Telegram integration)
   token: "YOUR_BOT_TOKEN_HERE"
@@ -79,6 +153,19 @@ child_agents:
     enable_token_tracking: true     # Approximate from transcript length
     enable_tool_tracking: true      # Count tool calls in transcript
     snapshot_interval: 30           # Seconds between checks
+
+# sm send v2: Reliable inter-agent messaging
+sm_send:
+  # Path to SQLite database for message queue persistence
+  db_path: "~/.local/share/claude-sessions/message_queue.db"
+  # Polling interval when waiting for user input to become stale (seconds)
+  input_poll_interval: 5
+  # How long unchanged user input must be before we consider it stale (seconds)
+  input_stale_timeout: 120
+  # Maximum messages to batch in single delivery
+  max_batch_size: 10
+  # Delay after Escape in urgent mode (milliseconds)
+  urgent_delay_ms: 500
 
 # Session defaults
 sessions:
