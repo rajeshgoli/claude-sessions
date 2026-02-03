@@ -66,6 +66,7 @@ class OutputMonitor:
         notify_permission_prompts: bool = True,
         notify_completion: bool = False,
         notify_idle: bool = True,
+        config: Optional[dict] = None,
     ):
         self.idle_timeout = idle_timeout
         self.poll_interval = poll_interval
@@ -74,6 +75,7 @@ class OutputMonitor:
         self.notify_permission_prompts = notify_permission_prompts
         self.notify_completion = notify_completion
         self.notify_idle = notify_idle
+        self.config = config or {}
 
         self._event_callback: Optional[Callable[[NotificationEvent], Awaitable[None]]] = None
         self._status_callback: Optional[Callable[[str, SessionStatus], Awaitable[None]]] = None
@@ -86,7 +88,12 @@ class OutputMonitor:
         self._notified_permissions: dict[str, datetime] = {}  # Debounce
         self._last_response_sent: dict[str, datetime] = {}  # Track when we sent response notifications
         self._hook_output_store: Optional[dict] = None  # Reference to hook output storage
-        self._idle_cooldown = 300  # Don't send idle notifications within 5 mins of response
+
+        # Load timeout configuration with fallbacks
+        timeouts = self.config.get("timeouts", {})
+        monitor_timeouts = timeouts.get("output_monitor", {})
+        self._idle_cooldown = monitor_timeouts.get("idle_cooldown_seconds", 300)
+        self._permission_debounce = monitor_timeouts.get("permission_debounce_seconds", 30)
 
     def set_event_callback(self, callback: Callable[[NotificationEvent], Awaitable[None]]):
         """Set the callback for notification events."""
@@ -224,9 +231,9 @@ class OutputMonitor:
 
     async def _handle_permission_prompt(self, session: Session, content: str):
         """Handle detected permission prompt."""
-        # Debounce - don't notify twice within 30 seconds
+        # Debounce - don't notify twice within configured window
         last_notified = self._notified_permissions.get(session.id)
-        if last_notified and datetime.now() - last_notified < timedelta(seconds=30):
+        if last_notified and datetime.now() - last_notified < timedelta(seconds=self._permission_debounce):
             return
 
         self._notified_permissions[session.id] = datetime.now()

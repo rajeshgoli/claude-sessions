@@ -17,18 +17,28 @@ logger = logging.getLogger(__name__)
 class RequestTimingMiddleware(BaseHTTPMiddleware):
     """Log slow requests for debugging."""
 
+    def __init__(self, app, config: Optional[dict] = None):
+        super().__init__(app)
+        self.config = config or {}
+
+        # Load timing thresholds from config
+        timeouts = self.config.get("timeouts", {})
+        server_timeouts = timeouts.get("server", {})
+        self.slow_threshold = server_timeouts.get("slow_request_threshold_seconds", 1.0)
+        self.timing_threshold = server_timeouts.get("request_timing_threshold_seconds", 0.1)
+
     async def dispatch(self, request: Request, call_next):
         start = time.monotonic()
         response = await call_next(request)
         elapsed = time.monotonic() - start
 
-        # Log slow requests (>1 second)
-        if elapsed > 1.0:
+        # Log slow requests
+        if elapsed > self.slow_threshold:
             logger.warning(
                 f"SLOW REQUEST: {request.method} {request.url.path} "
                 f"took {elapsed:.2f}s"
             )
-        elif elapsed > 0.1:
+        elif elapsed > self.timing_threshold:
             logger.info(
                 f"Request: {request.method} {request.url.path} "
                 f"took {elapsed*1000:.0f}ms"
@@ -134,6 +144,7 @@ def create_app(
     notifier=None,
     output_monitor=None,
     child_monitor=None,
+    config: Optional[dict] = None,
 ) -> FastAPI:
     """
     Create the FastAPI application.
@@ -142,6 +153,8 @@ def create_app(
         session_manager: SessionManager instance
         notifier: Notifier instance
         output_monitor: OutputMonitor instance
+        child_monitor: ChildMonitor instance
+        config: Configuration dictionary
 
     Returns:
         Configured FastAPI app
@@ -152,8 +165,11 @@ def create_app(
         version="0.1.0",
     )
 
-    # Add timing middleware for debugging
-    app.add_middleware(RequestTimingMiddleware)
+    # Store config first so middleware can access it
+    app.state.config = config or {}
+
+    # Add timing middleware for debugging (with config)
+    app.add_middleware(RequestTimingMiddleware, config=config)
 
     # Store references to components
     app.state.session_manager = session_manager
@@ -504,6 +520,12 @@ Provide ONLY the summary, no preamble or questions."""
 
             logger.info(f"Generating summary for session {session_id}, input length: {len(prompt)} chars")
 
+            # Get timeout from config
+            config = app.state.config or {}
+            timeouts = config.get("timeouts", {})
+            server_timeouts = timeouts.get("server", {})
+            summary_timeout = server_timeouts.get("summary_generation_timeout_seconds", 60)
+
             # Use asyncio.create_subprocess_exec for non-blocking execution
             import asyncio
             proc = await asyncio.create_subprocess_exec(
@@ -516,7 +538,7 @@ Provide ONLY the summary, no preamble or questions."""
             try:
                 stdout, stderr = await asyncio.wait_for(
                     proc.communicate(input=prompt.encode('utf-8')),
-                    timeout=60
+                    timeout=summary_timeout
                 )
                 result_stdout = stdout.decode('utf-8')
                 result_stderr = stderr.decode('utf-8')
@@ -524,7 +546,7 @@ Provide ONLY the summary, no preamble or questions."""
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
-                raise HTTPException(status_code=504, detail="Summary generation timed out (60s)")
+                raise HTTPException(status_code=504, detail=f"Summary generation timed out ({summary_timeout}s)")
 
             logger.info(f"Summary generated, return code: {returncode}, output length: {len(result_stdout)}")
 
@@ -1240,7 +1262,10 @@ Or continue working if not done yet."""
             ))
 
         elapsed = time.monotonic() - start
-        if elapsed > 0.05:  # Log if > 50ms
+        # Get hook timing threshold from config
+        config = app.state.config or {}
+        hook_threshold = config.get("timeouts", {}).get("server", {}).get("hook_timing_threshold_seconds", 0.05)
+        if elapsed > hook_threshold:
             logger.debug(f"hook_tool_use: parse={parse_time*1000:.1f}ms total={elapsed*1000:.1f}ms tool={tool_name}")
 
         return {"status": "logged"}
