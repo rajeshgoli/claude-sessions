@@ -53,7 +53,7 @@ def mock_child_monitor():
 def mock_notifier():
     """Create a mock notifier."""
     mock = MagicMock()
-    mock.telegram_bot = None
+    mock.telegram = None
     return mock
 
 
@@ -307,7 +307,7 @@ class TestTelegramCheck:
 
     def test_telegram_not_configured(self, mock_session_manager, mock_output_monitor, mock_child_monitor, mock_notifier):
         """Test when Telegram is not configured."""
-        mock_notifier.telegram_bot = None
+        mock_notifier.telegram = None
 
         app = create_app(
             session_manager=mock_session_manager,
@@ -331,7 +331,7 @@ class TestTelegramCheck:
         mock_telegram.application.running = True
         mock_telegram._session_threads = {"session1": (123, 456)}
         mock_telegram._topic_sessions = {(123, 456): "session1"}
-        mock_notifier.telegram_bot = mock_telegram
+        mock_notifier.telegram = mock_telegram
 
         app = create_app(
             session_manager=mock_session_manager,

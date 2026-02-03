@@ -46,12 +46,12 @@ def mock_session_manager():
     manager.app.state = Mock()
     manager.app.state.last_claude_output = {}
 
-    # Mock notifier with telegram_bot
+    # Mock notifier with telegram (not telegram_bot)
     manager.notifier = Mock()
-    manager.notifier.telegram_bot = Mock()
-    manager.notifier.telegram_bot.bot = AsyncMock()
-    manager.notifier.telegram_bot._topic_sessions = {}
-    manager.notifier.telegram_bot._session_threads = {}
+    manager.notifier.telegram = Mock()
+    manager.notifier.telegram.bot = AsyncMock()
+    manager.notifier.telegram._topic_sessions = {}
+    manager.notifier.telegram._session_threads = {}
 
     return manager
 
@@ -105,7 +105,7 @@ async def test_monitor_detects_tmux_death(output_monitor, mock_session, mock_ses
     mock_session_manager._save_state.assert_called()
 
     # Telegram topic should be deleted
-    mock_session_manager.notifier.telegram_bot.bot.delete_forum_topic.assert_called_once_with(
+    mock_session_manager.notifier.telegram.bot.delete_forum_topic.assert_called_once_with(
         chat_id=12345,
         message_thread_id=67890,
     )
@@ -121,8 +121,8 @@ async def test_cleanup_session_full_workflow(output_monitor, mock_session, mock_
     mock_session_manager.sessions[mock_session.id] = mock_session
 
     # Add to telegram mappings
-    mock_session_manager.notifier.telegram_bot._topic_sessions[(12345, 67890)] = mock_session.id
-    mock_session_manager.notifier.telegram_bot._session_threads[mock_session.id] = (12345, 99999)
+    mock_session_manager.notifier.telegram._topic_sessions[(12345, 67890)] = mock_session.id
+    mock_session_manager.notifier.telegram._session_threads[mock_session.id] = (12345, 99999)
 
     # Add to hook output cache
     mock_session_manager.app.state.last_claude_output[mock_session.id] = "some output"
@@ -141,9 +141,9 @@ async def test_cleanup_session_full_workflow(output_monitor, mock_session, mock_
     assert mock_session_manager._save_state.called
 
     # Telegram cleanup
-    assert (12345, 67890) not in mock_session_manager.notifier.telegram_bot._topic_sessions
-    assert mock_session.id not in mock_session_manager.notifier.telegram_bot._session_threads
-    mock_session_manager.notifier.telegram_bot.bot.delete_forum_topic.assert_called_once()
+    assert (12345, 67890) not in mock_session_manager.notifier.telegram._topic_sessions
+    assert mock_session.id not in mock_session_manager.notifier.telegram._session_threads
+    mock_session_manager.notifier.telegram.bot.delete_forum_topic.assert_called_once()
 
     # Hook output cache cleanup
     assert mock_session.id not in mock_session_manager.app.state.last_claude_output
@@ -161,7 +161,7 @@ async def test_cleanup_handles_telegram_delete_failure(output_monitor, mock_sess
     mock_session_manager.sessions[mock_session.id] = mock_session
 
     # Make Telegram deletion fail
-    mock_session_manager.notifier.telegram_bot.bot.delete_forum_topic.side_effect = Exception("Permission denied")
+    mock_session_manager.notifier.telegram.bot.delete_forum_topic.side_effect = Exception("Permission denied")
 
     # Call cleanup - should not raise
     await output_monitor.cleanup_session(mock_session)
@@ -190,7 +190,7 @@ async def test_cleanup_without_telegram(output_monitor, mock_session, mock_sessi
     assert mock_session.id not in mock_session_manager.sessions
 
     # Telegram delete should not be called
-    mock_session_manager.notifier.telegram_bot.bot.delete_forum_topic.assert_not_called()
+    mock_session_manager.notifier.telegram.bot.delete_forum_topic.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -251,12 +251,12 @@ async def test_cleanup_removes_from_all_telegram_mappings(output_monitor, mock_s
     mock_session_manager.sessions[mock_session.id] = mock_session
 
     # Add to both topic and thread mappings
-    mock_session_manager.notifier.telegram_bot._topic_sessions[(12345, 67890)] = mock_session.id
-    mock_session_manager.notifier.telegram_bot._session_threads[mock_session.id] = (12345, 11111)
+    mock_session_manager.notifier.telegram._topic_sessions[(12345, 67890)] = mock_session.id
+    mock_session_manager.notifier.telegram._session_threads[mock_session.id] = (12345, 11111)
 
     # Call cleanup
     await output_monitor.cleanup_session(mock_session)
 
     # Verify both removed
-    assert (12345, 67890) not in mock_session_manager.notifier.telegram_bot._topic_sessions
-    assert mock_session.id not in mock_session_manager.notifier.telegram_bot._session_threads
+    assert (12345, 67890) not in mock_session_manager.notifier.telegram._topic_sessions
+    assert mock_session.id not in mock_session_manager.notifier.telegram._session_threads
