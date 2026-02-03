@@ -478,7 +478,7 @@ def create_app(
                 details={"configured": False},
             )
 
-        telegram_bot = getattr(notifier, 'telegram_bot', None)
+        telegram_bot = getattr(notifier, 'telegram', None)
         if not telegram_bot:
             return HealthCheckResult(
                 status="ok",

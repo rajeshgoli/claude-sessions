@@ -383,7 +383,7 @@ class OutputMonitor:
         if session.telegram_thread_id and session.telegram_chat_id:
             # Get notifier to access telegram_bot
             notifier = getattr(self._session_manager, 'notifier', None) if self._session_manager else None
-            telegram_bot = getattr(notifier, 'telegram_bot', None) if notifier else None
+            telegram_bot = getattr(notifier, 'telegram', None) if notifier else None
 
             if telegram_bot and telegram_bot.bot:
                 try:
