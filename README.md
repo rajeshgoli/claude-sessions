@@ -336,6 +336,136 @@ pytest tests/ --cov=src
 
 ---
 
+## Example Workflows (Add to Your CLAUDE.md)
+
+Copy these patterns into your project's `CLAUDE.md` to enable agent swarms.
+
+### The EM (Engineering Manager) Pattern
+
+```markdown
+## Multi-Agent Workflows
+
+When asked to work "as EM" or orchestrate complex tasks, use the session manager.
+
+### Core Principle
+
+**Never wait synchronously.** Spawn workers, go idle, wake on notification.
+
+### Spawn Templates
+
+**Scout (Investigation):**
+```bash
+sm spawn "As scout, investigate <problem>. \
+Write findings to docs/working/<name>.md. \
+Do NOT fix code - investigation only. \
+When done: sm send $EM_ID 'done: report at docs/working/<name>.md'" \
+  --name "scout-<task>" \
+  --wait 600
+```
+
+**Engineer (Implementation):**
+```bash
+sm spawn "As engineer, implement ticket #<N>. \
+Read the spec at docs/working/<spec>.md for context. \
+Create PR when done. \
+When done: sm send $EM_ID 'done: PR #<number> created'" \
+  --name "engineer-ticket<N>" \
+  --wait 600
+```
+
+**Architect (Review):**
+```bash
+sm spawn "As architect, review PR #<N>. \
+Check for: dead code, magic numbers, pattern consistency. \
+Merge to dev if approved. \
+When done: sm send $EM_ID 'review: approved|changes_needed'" \
+  --name "architect-pr<N>" \
+  --wait 300
+```
+
+### Workflow: Implement an Epic
+
+```
+"As EM, implement epic #<number>"
+```
+
+1. Read epic to understand scope
+2. For each ticket:
+   - Spawn Engineer → implement
+   - Spawn Architect → review PR
+   - If changes needed → route feedback to Engineer
+   - If approved → Architect merges
+3. Notify human on completion
+
+### Workflow: Investigate and Spec
+
+```
+"As EM, investigate <problem> and create a spec"
+```
+
+1. Spawn Scout → investigation, write spec
+2. Spawn Architect → review spec
+3. Route feedback to Scout until approved
+4. Spawn Scout → file tickets
+5. Notify human: ready for review
+
+### Communication Patterns
+
+- **Status updates:** `sm send $EM_ID "done: PR #123 created"`
+- **Urgent corrections:** `sm send $ID "UPDATE: use X instead" --urgent`
+- **Reports go in files:** Write to `docs/working/`, then notify
+
+### Timeout Guidelines
+
+| Agent | --wait |
+|-------|--------|
+| Scout | 600s (10 min) |
+| Engineer | 600s (10 min) |
+| Architect | 300s (5 min) |
+
+### Circuit Breaker
+
+Pause and alert human when:
+- Tests fail unexpectedly
+- Agent stuck in loop
+- Unclear how to proceed
+
+```
+EM: "Circuit breaker triggered. <reason>. Awaiting guidance."
+```
+```
+
+### Workspace Coordination
+
+Add to your `.claude/settings.json` for auto-locking:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": { "tool_name": "write|edit" },
+      "hooks": [{ "type": "command", "command": "sm auto-lock" }]
+    }]
+  }
+}
+```
+
+### Quick Reference
+
+| Command | When to Use |
+|---------|-------------|
+| `sm spawn "..." --name X --wait N` | Start a worker agent |
+| `sm send <id> "..." --urgent` | Send task to agent |
+| `sm wait <id> N` | Async wait for completion |
+| `sm clear <id>` | Reset agent for new task |
+| `sm children` | See your spawned agents |
+| `sm what <id>` | AI summary of agent activity |
+| `sm attach <id>` | Jump into agent's session |
+| `sm output <id>` | See agent's recent output |
+| `sm kill <id>` | Terminate agent |
+
+---
+
 ## Requirements
 
 - macOS (Linux support planned)
