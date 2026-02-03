@@ -1,9 +1,11 @@
 """FastAPI server for hooks and API endpoints."""
 
+import json
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any, Literal
 
 from fastapi import FastAPI, HTTPException, Body, Request
 from pydantic import BaseModel
@@ -139,6 +141,22 @@ class KillSessionRequest(BaseModel):
     requester_session_id: Optional[str] = None
 
 
+# Health check response models
+class HealthCheckResult(BaseModel):
+    """Result of a single health check."""
+    status: Literal["ok", "warning", "error"]
+    message: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+
+
+class HealthCheckResponse(BaseModel):
+    """Response from detailed health check endpoint."""
+    status: Literal["healthy", "degraded", "unhealthy"]
+    checks: Dict[str, HealthCheckResult]
+    resources: Dict[str, Any]
+    timestamp: str
+
+
 def create_app(
     session_manager=None,
     notifier=None,
@@ -187,6 +205,407 @@ def create_app(
     async def health():
         """Health check endpoint."""
         return {"status": "healthy"}
+
+    @app.get("/health/detailed", response_model=HealthCheckResponse)
+    async def health_detailed():
+        """
+        Detailed health check endpoint for monitoring and debugging.
+
+        Performs comprehensive checks on:
+        - State file integrity
+        - Session consistency (memory vs tmux)
+        - Message queue health
+        - Component status (telegram, monitors)
+        - Resource usage
+        """
+        checks: Dict[str, HealthCheckResult] = {}
+        resources: Dict[str, Any] = {}
+
+        # Track overall status (starts healthy, degrades based on check results)
+        overall_status: Literal["healthy", "degraded", "unhealthy"] = "healthy"
+
+        def update_status(check_status: str):
+            nonlocal overall_status
+            if check_status == "error":
+                overall_status = "unhealthy"
+            elif check_status == "warning" and overall_status == "healthy":
+                overall_status = "degraded"
+
+        # 1. State File Integrity Check
+        state_file_check = await _check_state_file(app)
+        checks["state_file"] = state_file_check
+        update_status(state_file_check.status)
+
+        # 2. Session Consistency Check (memory vs tmux)
+        session_check = await _check_session_consistency(app)
+        checks["tmux_sessions"] = session_check
+        update_status(session_check.status)
+
+        # 3. Message Queue Health Check
+        mq_check = await _check_message_queue(app)
+        checks["message_queue"] = mq_check
+        update_status(mq_check.status)
+
+        # 4. Component Status Checks
+        telegram_check = await _check_telegram(app)
+        checks["telegram"] = telegram_check
+        update_status(telegram_check.status)
+
+        monitor_check = await _check_monitors(app)
+        checks["monitors"] = monitor_check
+        update_status(monitor_check.status)
+
+        # 5. Resource Usage
+        resources = _get_resource_usage(app)
+
+        return HealthCheckResponse(
+            status=overall_status,
+            checks=checks,
+            resources=resources,
+            timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        )
+
+    async def _check_state_file(app) -> HealthCheckResult:
+        """Check state file integrity."""
+        if not app.state.session_manager:
+            return HealthCheckResult(
+                status="error",
+                message="Session manager not configured",
+            )
+
+        state_file = app.state.session_manager.state_file
+        try:
+            if not state_file.exists():
+                return HealthCheckResult(
+                    status="ok",
+                    message="No state file (fresh start)",
+                    details={"exists": False},
+                )
+
+            with open(state_file) as f:
+                data = json.load(f)
+
+            # Validate required structure
+            if not isinstance(data, dict):
+                return HealthCheckResult(
+                    status="error",
+                    message="State file is not a valid JSON object",
+                )
+
+            sessions = data.get("sessions", [])
+            if not isinstance(sessions, list):
+                return HealthCheckResult(
+                    status="error",
+                    message="State file sessions field is not a list",
+                )
+
+            return HealthCheckResult(
+                status="ok",
+                message="State file valid",
+                details={
+                    "exists": True,
+                    "sessions_in_file": len(sessions),
+                    "file_size_bytes": state_file.stat().st_size,
+                },
+            )
+
+        except json.JSONDecodeError as e:
+            return HealthCheckResult(
+                status="error",
+                message=f"State file contains invalid JSON: {e}",
+            )
+        except Exception as e:
+            return HealthCheckResult(
+                status="error",
+                message=f"Failed to read state file: {e}",
+            )
+
+    async def _check_session_consistency(app) -> HealthCheckResult:
+        """Check that sessions in memory match tmux sessions."""
+        if not app.state.session_manager:
+            return HealthCheckResult(
+                status="error",
+                message="Session manager not configured",
+            )
+
+        sm = app.state.session_manager
+        memory_sessions = list(sm.sessions.values())
+
+        # Get tmux sessions managed by us (those starting with "claude-")
+        try:
+            all_tmux_sessions = set(sm.tmux.list_sessions())
+            our_tmux_sessions = {s for s in all_tmux_sessions if s.startswith("claude-")}
+        except Exception as e:
+            return HealthCheckResult(
+                status="error",
+                message=f"Failed to list tmux sessions: {e}",
+            )
+
+        # Check for sessions in memory that don't exist in tmux
+        missing_in_tmux = []
+        for session in memory_sessions:
+            if session.status not in (SessionStatus.STOPPED,) and session.tmux_session not in all_tmux_sessions:
+                missing_in_tmux.append(session.id)
+
+        # Check for orphaned tmux sessions (in tmux but not in memory)
+        memory_tmux_names = {s.tmux_session for s in memory_sessions}
+        orphaned_tmux = list(our_tmux_sessions - memory_tmux_names)
+
+        # Check for duplicate session IDs (should never happen)
+        session_ids = [s.id for s in memory_sessions]
+        duplicates = [sid for sid in session_ids if session_ids.count(sid) > 1]
+
+        if missing_in_tmux or duplicates:
+            return HealthCheckResult(
+                status="error",
+                message="Session consistency issues found",
+                details={
+                    "sessions_in_memory": len(memory_sessions),
+                    "our_tmux_sessions": len(our_tmux_sessions),
+                    "missing_in_tmux": missing_in_tmux,
+                    "orphaned_tmux": orphaned_tmux,
+                    "duplicate_ids": list(set(duplicates)),
+                },
+            )
+
+        if orphaned_tmux:
+            return HealthCheckResult(
+                status="warning",
+                message=f"Found {len(orphaned_tmux)} orphaned tmux sessions",
+                details={
+                    "sessions_in_memory": len(memory_sessions),
+                    "our_tmux_sessions": len(our_tmux_sessions),
+                    "orphaned_tmux": orphaned_tmux,
+                },
+            )
+
+        return HealthCheckResult(
+            status="ok",
+            message="Sessions consistent",
+            details={
+                "sessions_in_memory": len(memory_sessions),
+                "our_tmux_sessions": len(our_tmux_sessions),
+                "orphaned_tmux": 0,
+            },
+        )
+
+    async def _check_message_queue(app) -> HealthCheckResult:
+        """Check message queue health."""
+        sm = app.state.session_manager
+        if not sm or not sm.message_queue_manager:
+            return HealthCheckResult(
+                status="warning",
+                message="Message queue not configured",
+            )
+
+        mq = sm.message_queue_manager
+
+        try:
+            # Check if database is accessible
+            db_path = mq.db_path
+            if not db_path.exists():
+                return HealthCheckResult(
+                    status="warning",
+                    message="Message queue database does not exist yet",
+                    details={"db_exists": False},
+                )
+
+            # Count pending and potentially stuck messages
+            import sqlite3
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+
+            # Count total pending
+            cursor.execute("SELECT COUNT(*) FROM messages WHERE delivered_at IS NULL")
+            pending_count = cursor.fetchone()[0]
+
+            # Count stuck messages (queued > 1 hour ago and not delivered)
+            cursor.execute("""
+                SELECT COUNT(*) FROM messages
+                WHERE delivered_at IS NULL
+                AND datetime(queued_at) < datetime('now', '-1 hour')
+            """)
+            stuck_count = cursor.fetchone()[0]
+
+            # Count expired messages still in queue
+            cursor.execute("""
+                SELECT COUNT(*) FROM messages
+                WHERE delivered_at IS NULL
+                AND timeout_at IS NOT NULL
+                AND datetime(timeout_at) < datetime('now')
+            """)
+            expired_count = cursor.fetchone()[0]
+
+            conn.close()
+
+            if stuck_count > 0 or expired_count > 0:
+                return HealthCheckResult(
+                    status="warning",
+                    message=f"Found {stuck_count} stuck and {expired_count} expired messages",
+                    details={
+                        "db_exists": True,
+                        "pending": pending_count,
+                        "stuck": stuck_count,
+                        "expired": expired_count,
+                    },
+                )
+
+            return HealthCheckResult(
+                status="ok",
+                message="Message queue healthy",
+                details={
+                    "db_exists": True,
+                    "pending": pending_count,
+                    "stuck": 0,
+                    "expired": 0,
+                },
+            )
+
+        except Exception as e:
+            return HealthCheckResult(
+                status="error",
+                message=f"Failed to check message queue: {e}",
+            )
+
+    async def _check_telegram(app) -> HealthCheckResult:
+        """Check Telegram bot status."""
+        notifier = app.state.notifier
+        if not notifier:
+            return HealthCheckResult(
+                status="ok",
+                message="Notifier not configured",
+                details={"configured": False},
+            )
+
+        telegram_bot = getattr(notifier, 'telegram_bot', None)
+        if not telegram_bot:
+            return HealthCheckResult(
+                status="ok",
+                message="Telegram not configured",
+                details={"configured": False},
+            )
+
+        # Check if bot is initialized and running
+        bot = getattr(telegram_bot, 'bot', None)
+        application = getattr(telegram_bot, 'application', None)
+
+        if not bot or not application:
+            return HealthCheckResult(
+                status="warning",
+                message="Telegram bot not fully initialized",
+                details={
+                    "configured": True,
+                    "bot_initialized": bot is not None,
+                    "application_initialized": application is not None,
+                },
+            )
+
+        # Try to check if bot is running
+        is_running = application.running if hasattr(application, 'running') else None
+
+        return HealthCheckResult(
+            status="ok",
+            message="Telegram bot running",
+            details={
+                "configured": True,
+                "bot_initialized": True,
+                "application_running": is_running,
+                "tracked_sessions": len(telegram_bot._session_threads),
+                "tracked_topics": len(telegram_bot._topic_sessions),
+            },
+        )
+
+    async def _check_monitors(app) -> HealthCheckResult:
+        """Check output and child monitors status."""
+        output_monitor = app.state.output_monitor
+        child_monitor = app.state.child_monitor
+
+        output_status = {
+            "configured": output_monitor is not None,
+            "active_tasks": 0,
+        }
+
+        if output_monitor:
+            output_status["active_tasks"] = len(output_monitor._tasks)
+
+        child_status = {
+            "configured": child_monitor is not None,
+            "running": False,
+        }
+
+        if child_monitor:
+            child_status["running"] = getattr(child_monitor, '_running', False)
+
+        # Determine overall status
+        if not output_monitor:
+            return HealthCheckResult(
+                status="warning",
+                message="Output monitor not configured",
+                details={
+                    "output_monitor": output_status,
+                    "child_monitor": child_status,
+                },
+            )
+
+        # Check if active sessions are being monitored
+        sm = app.state.session_manager
+        if sm:
+            active_sessions = [s for s in sm.sessions.values() if s.status not in (SessionStatus.STOPPED,)]
+            monitored = len(output_monitor._tasks)
+            if len(active_sessions) > monitored:
+                return HealthCheckResult(
+                    status="warning",
+                    message=f"{len(active_sessions) - monitored} active sessions not being monitored",
+                    details={
+                        "output_monitor": output_status,
+                        "child_monitor": child_status,
+                        "active_sessions": len(active_sessions),
+                        "monitored_sessions": monitored,
+                    },
+                )
+
+        return HealthCheckResult(
+            status="ok",
+            message="Monitors running",
+            details={
+                "output_monitor": output_status,
+                "child_monitor": child_status,
+            },
+        )
+
+    def _get_resource_usage(app) -> Dict[str, Any]:
+        """Get resource usage statistics."""
+        resources = {
+            "active_sessions": 0,
+            "output_cache_size": 0,
+            "scheduled_tasks": 0,
+            "monitor_tasks": 0,
+        }
+
+        # Active sessions
+        sm = app.state.session_manager
+        if sm:
+            resources["active_sessions"] = len([
+                s for s in sm.sessions.values()
+                if s.status not in (SessionStatus.STOPPED,)
+            ])
+            resources["total_sessions"] = len(sm.sessions)
+
+        # Output cache size
+        if hasattr(app.state, 'last_claude_output'):
+            resources["output_cache_size"] = len(app.state.last_claude_output)
+
+        # Scheduled tasks in message queue
+        if sm and sm.message_queue_manager:
+            mq = sm.message_queue_manager
+            if hasattr(mq, '_scheduled_tasks'):
+                resources["scheduled_tasks"] = len(mq._scheduled_tasks)
+
+        # Monitor tasks
+        if app.state.output_monitor:
+            resources["monitor_tasks"] = len(app.state.output_monitor._tasks)
+
+        return resources
 
     @app.post("/sessions", response_model=SessionResponse)
     async def create_session(request: CreateSessionRequest):
