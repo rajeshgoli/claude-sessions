@@ -119,7 +119,7 @@ def main():
     # sm codex [working_dir]
     parser_codex = subparsers.add_parser(
         "codex",
-        help="Create a new Codex session and attach to it"
+        help="Create a new Codex session (no tmux attach)"
     )
     parser_codex.add_argument(
         "working_dir",

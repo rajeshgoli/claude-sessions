@@ -899,6 +899,7 @@ def cmd_spawn(
     Args:
         client: API client
         parent_session_id: Parent session ID (current session)
+        provider: "claude" or "codex"
         prompt: Initial prompt for the child agent
         name: Friendly name for the child session
         wait: Monitor child and notify when complete or idle for N seconds
@@ -1072,14 +1073,15 @@ def cmd_kill(
 
 def cmd_new(client: SessionManagerClient, working_dir: Optional[str] = None, provider: str = "claude") -> int:
     """
-    Create a new Claude Code session and attach to it.
+    Create a new session (Claude attaches; Codex does not).
 
     Args:
         client: API client
         working_dir: Working directory (optional, defaults to $PWD)
+        provider: "claude" or "codex"
 
     Exit codes:
-        0: Successfully created and attached
+        0: Successfully created (and attached for Claude)
         1: Failed to create session
         2: Session manager unavailable
     """
