@@ -33,6 +33,7 @@ class SessionManager:
         self.sessions: dict[str, Session] = {}
         self._event_handlers: list[Callable[[NotificationEvent], Awaitable[None]]] = []
         self.codex_sessions: dict[str, CodexAppServerSession] = {}
+        self.codex_turns_in_flight: set[str] = set()
         self.hook_output_store: Optional[dict] = None
 
         codex_config = self.config.get("codex", {})
@@ -276,13 +277,19 @@ class SessionManager:
                     working_dir=working_dir,
                     config=self.codex_config,
                     on_turn_complete=self._handle_codex_turn_complete,
+                    on_turn_started=self._handle_codex_turn_started,
+                    on_turn_delta=self._handle_codex_turn_delta,
                 )
                 thread_id = await codex_session.start(thread_id=session.codex_thread_id, model=model)
                 session.codex_thread_id = thread_id
-                self.codex_sessions[session.id] = codex_session
                 if initial_prompt:
-                    await codex_session.send_user_turn(initial_prompt, model=model)
-                    session.last_activity = datetime.now()
+                    try:
+                        await codex_session.send_user_turn(initial_prompt, model=model)
+                        session.last_activity = datetime.now()
+                    except Exception:
+                        await codex_session.close()
+                        raise
+                self.codex_sessions[session.id] = codex_session
             except CodexAppServerError as e:
                 logger.error(f"Failed to start Codex app-server session for {session.name}: {e}")
                 return None
@@ -642,6 +649,8 @@ class SessionManager:
                 working_dir=session.working_dir,
                 config=self.codex_config,
                 on_turn_complete=self._handle_codex_turn_complete,
+                on_turn_started=self._handle_codex_turn_started,
+                on_turn_delta=self._handle_codex_turn_delta,
             )
             thread_id = await codex_session.start(thread_id=session.codex_thread_id, model=model)
             session.codex_thread_id = thread_id
@@ -700,6 +709,8 @@ class SessionManager:
         if not session:
             return
 
+        self.codex_turns_in_flight.discard(session_id)
+
         # Store last output (for /status, /last-message)
         if text and self.hook_output_store is not None:
             self.hook_output_store["latest"] = text
@@ -725,6 +736,32 @@ class SessionManager:
                     urgent=False,
                 )
                 await self.notifier.notify(event, session)
+
+    async def _handle_codex_turn_started(self, session_id: str, turn_id: str):
+        """Mark Codex turn as active and update activity timestamps."""
+        self.codex_turns_in_flight.add(session_id)
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+        session.status = SessionStatus.RUNNING
+        session.last_activity = datetime.now()
+        # Save on turn start (lower frequency)
+        self._save_state()
+        if self.message_queue_manager:
+            self.message_queue_manager.mark_session_active(session_id)
+
+    async def _handle_codex_turn_delta(self, session_id: str, turn_id: str, delta: str):
+        """Update activity on Codex streaming deltas."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+        session.last_activity = datetime.now()
+        if self.message_queue_manager:
+            self.message_queue_manager.mark_session_active(session_id)
+
+    def is_codex_turn_active(self, session_id: str) -> bool:
+        """Check if a Codex turn is currently in flight."""
+        return session_id in self.codex_turns_in_flight
 
     async def clear_session(self, session_id: str, new_prompt: Optional[str] = None) -> bool:
         """Clear/reset a session's context (Claude: /clear, Codex: new thread)."""

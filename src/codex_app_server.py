@@ -45,11 +45,15 @@ class CodexAppServerSession:
         working_dir: str,
         config: CodexAppServerConfig,
         on_turn_complete: Callable[[str, str, str], Awaitable[None]],
+        on_turn_started: Optional[Callable[[str, str], Awaitable[None]]] = None,
+        on_turn_delta: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
     ):
         self.session_id = session_id
         self.working_dir = working_dir
         self.config = config
         self.on_turn_complete = on_turn_complete
+        self.on_turn_started = on_turn_started
+        self.on_turn_delta = on_turn_delta
 
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._reader_task: Optional[asyncio.Task] = None
@@ -271,6 +275,8 @@ class CodexAppServerSession:
             self._current_turn_id = turn.get("id")
             if self._current_turn_id:
                 self._turn_buffers.setdefault(self._current_turn_id, [])
+                if self.on_turn_started:
+                    await self.on_turn_started(self.session_id, self._current_turn_id)
             return
 
         if method == "item/agentMessage/delta":
@@ -278,6 +284,8 @@ class CodexAppServerSession:
             delta = params.get("delta", "")
             if turn_id:
                 self._turn_buffers.setdefault(turn_id, []).append(delta)
+                if self.on_turn_delta:
+                    await self.on_turn_delta(self.session_id, turn_id, delta)
             return
 
         if method == "turn/completed":

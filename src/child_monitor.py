@@ -101,6 +101,9 @@ class ChildMonitor:
                 if child_session.last_tool_call:
                     idle_time = (datetime.now() - child_session.last_tool_call).total_seconds()
                 elif getattr(child_session, "provider", "claude") == "codex":
+                    if self.session_manager.is_codex_turn_active(child_session_id):
+                        await asyncio.sleep(5)
+                        continue
                     idle_time = (datetime.now() - child_session.last_activity).total_seconds()
                 else:
                     # No tool call yet, check since spawned_at
