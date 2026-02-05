@@ -653,6 +653,10 @@ class MessageQueueManager:
                 messages = [m for m in messages if m.delivery_mode == "important"]
                 if not messages:
                     return
+                # Important should not interrupt active work; wait until idle
+                if not state.is_idle:
+                    logger.debug(f"Session {session_id} not idle, deferring important delivery")
+                    return
             else:
                 # For sequential, only deliver if session is idle
                 if not state.is_idle:
