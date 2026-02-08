@@ -197,6 +197,16 @@ class Session:
         if completion_status is not None and isinstance(completion_status, str):
             completion_status = CompletionStatus(completion_status)
 
+        # Backward compatibility: map removed status values to current ones
+        raw_status = data["status"]
+        status_mapping = {
+            "starting": "running",
+            "waiting_input": "idle",
+            "waiting_permission": "idle",
+            "error": "idle",  # Error state no longer exists, treat as idle
+        }
+        mapped_status = status_mapping.get(raw_status, raw_status)
+
         return cls(
             id=data["id"],
             name=data["name"],
@@ -204,7 +214,7 @@ class Session:
             tmux_session=data["tmux_session"],
             provider=data.get("provider", "claude"),
             log_file=data["log_file"],
-            status=SessionStatus(data["status"]),
+            status=SessionStatus(mapped_status),
             created_at=datetime.fromisoformat(data["created_at"]),
             last_activity=datetime.fromisoformat(data["last_activity"]),
             telegram_chat_id=data.get("telegram_chat_id"),

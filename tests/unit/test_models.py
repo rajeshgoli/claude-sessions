@@ -154,6 +154,31 @@ class TestSession:
         session = Session.from_dict(data)
         assert session.telegram_thread_id == 789
 
+    def test_backward_compatibility_legacy_status_values(self):
+        """from_dict handles removed status values (starting, waiting_input, waiting_permission, error)."""
+        base_data = {
+            "id": "test123",
+            "name": "test",
+            "working_dir": "/tmp",
+            "tmux_session": "claude-test123",
+            "log_file": "/tmp/test.log",
+            "created_at": "2024-01-15T10:00:00",
+            "last_activity": "2024-01-15T11:00:00",
+        }
+
+        # Test each legacy status maps correctly
+        legacy_mappings = {
+            "starting": SessionStatus.RUNNING,
+            "waiting_input": SessionStatus.IDLE,
+            "waiting_permission": SessionStatus.IDLE,
+            "error": SessionStatus.IDLE,
+        }
+
+        for legacy_status, expected_status in legacy_mappings.items():
+            data = {**base_data, "status": legacy_status}
+            session = Session.from_dict(data)
+            assert session.status == expected_status, f"Legacy status '{legacy_status}' should map to {expected_status}"
+
 
 class TestSubagent:
     """Tests for Subagent dataclass."""
