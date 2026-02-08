@@ -986,7 +986,7 @@ def cmd_children(
     if not children:
         if not json_output:
             print("No child sessions")
-        return 1
+        return 0  # No children is a valid result, not an error
 
     if json_output:
         print(json_lib.dumps(children, indent=2))
