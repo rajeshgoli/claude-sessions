@@ -259,7 +259,7 @@ def cmd_who(client: SessionManagerClient, session_id: str) -> int:
     return 0
 
 
-def cmd_what(client: SessionManagerClient, target_session_id: str, lines: int, deep: bool = False) -> int:
+def cmd_what(client: SessionManagerClient, identifier: str, lines: int, deep: bool = False) -> int:
     """
     Get AI-generated summary of what a session is doing.
 
@@ -268,29 +268,28 @@ def cmd_what(client: SessionManagerClient, target_session_id: str, lines: int, d
         1: Session not found or summary unavailable
         2: Session manager unavailable
     """
-    summary = client.get_summary(target_session_id, lines)
+    # Resolve identifier (could be session ID or friendly name)
+    session_id, session = resolve_session_id(client, identifier)
+    if session_id is None:
+        sessions = client.list_sessions()
+        if sessions is None:
+            print("Error: Session manager unavailable", file=sys.stderr)
+            return 2
+        else:
+            print("Error: Session not found", file=sys.stderr)
+            return 1
+
+    summary = client.get_summary(session_id, lines)
 
     if summary is None:
-        # Check if it's a connection issue
-        session = client.get_session(target_session_id)
-        if session is None:
-            # Could be unavailable or not found
-            sessions = client.list_sessions()
-            if sessions is None:
-                print("Error: Session manager unavailable", file=sys.stderr)
-                return 2
-            else:
-                print("Error: Session not found", file=sys.stderr)
-                return 1
-        else:
-            print("Error: Summary unavailable", file=sys.stderr)
-            return 1
+        print("Error: Summary unavailable", file=sys.stderr)
+        return 1
 
     print(summary)
 
     # If --deep flag is set, show subagent activity
     if deep:
-        subagents = client.list_subagents(target_session_id)
+        subagents = client.list_subagents(session_id)
         if subagents:
             print()
             print("Subagents:")
