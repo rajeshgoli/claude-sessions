@@ -126,6 +126,9 @@ class Session:
     touched_repos: set[str] = field(default_factory=set)  # Repo roots this session has written to
     worktrees: list[str] = field(default_factory=list)  # Worktree paths created by this session
 
+    # Crash recovery fields
+    recovery_count: int = 0  # Number of times this session has been auto-recovered
+
     def __post_init__(self):
         if not self.name:
             if self.provider == "claude":
@@ -173,6 +176,8 @@ class Session:
             # Lock management fields
             "touched_repos": list(self.touched_repos),
             "worktrees": self.worktrees,
+            # Crash recovery fields
+            "recovery_count": self.recovery_count,
         }
 
     @classmethod
@@ -224,6 +229,8 @@ class Session:
             # Lock management fields
             touched_repos=set(data.get("touched_repos", [])),
             worktrees=data.get("worktrees", []),
+            # Crash recovery fields
+            recovery_count=data.get("recovery_count", 0),
         )
 
 

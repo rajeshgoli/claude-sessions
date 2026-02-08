@@ -48,10 +48,17 @@ COMPLETION_PATTERNS = [
     r'All tests passed',
 ]
 
+# Patterns that indicate Claude Code harness crash (JavaScript stack overflow)
+CRASH_PATTERNS = [
+    r'RangeError: Maximum call stack size exceeded',
+    r'Exception in PromiseRejectCallback',
+]
+
 # Compiled patterns for efficiency
 _permission_re = re.compile('|'.join(PERMISSION_PATTERNS), re.IGNORECASE)
 _error_re = re.compile('|'.join(ERROR_PATTERNS))
 _completion_re = re.compile('|'.join(COMPLETION_PATTERNS), re.IGNORECASE)
+_crash_re = re.compile('|'.join(CRASH_PATTERNS))
 
 
 class OutputMonitor:
@@ -81,6 +88,7 @@ class OutputMonitor:
         self._status_callback: Optional[Callable[[str, SessionStatus], Awaitable[None]]] = None
         self._save_state_callback: Optional[Callable[[], None]] = None
         self._session_manager = None  # Reference to SessionManager for looking up sessions
+        self._crash_recovery_callback: Optional[Callable[[Session], Awaitable[None]]] = None
         self._running = False
         self._tasks: dict[str, asyncio.Task] = {}
         self._file_positions: dict[str, int] = {}
@@ -114,6 +122,10 @@ class OutputMonitor:
     def set_session_manager(self, session_manager):
         """Set reference to SessionManager for session lookups."""
         self._session_manager = session_manager
+
+    def set_crash_recovery_callback(self, callback: Callable[[Session], Awaitable[None]]):
+        """Set callback for crash recovery (called when harness crash detected)."""
+        self._crash_recovery_callback = callback
 
     async def start_monitoring(self, session: Session, is_restored: bool = False):
         """Start monitoring a session's output."""
@@ -217,6 +229,11 @@ class OutputMonitor:
 
     async def _analyze_content(self, session: Session, content: str):
         """Analyze new content for patterns."""
+        # Check for harness crash (highest priority - triggers recovery)
+        if _crash_re.search(content):
+            await self._handle_crash(session, content)
+            return  # Don't process other patterns during crash
+
         # Check for permission prompts
         if _permission_re.search(content):
             await self._handle_permission_prompt(session, content)
@@ -309,6 +326,36 @@ class OutputMonitor:
             await self._event_callback(event)
 
         logger.info(f"Completion detected in session {session.id}")
+
+    async def _handle_crash(self, session: Session, content: str):
+        """
+        Handle detected Claude Code harness crash.
+
+        This triggers the crash recovery flow:
+        1. Pause message queue (prevent sm send going to bash)
+        2. Send /exit to cleanly shutdown crashed harness
+        3. Reset terminal with stty sane
+        4. Resume Claude with --resume flag
+        5. Unpause message queue
+        """
+        # Only recover sessions in IDLE or STOPPED state (not RUNNING)
+        if session.status == SessionStatus.RUNNING:
+            logger.warning(
+                f"Crash detected in session {session.id} but status is RUNNING, "
+                "skipping recovery (agent may still be active)"
+            )
+            return
+
+        logger.warning(f"Claude Code harness crash detected in session {session.id}")
+
+        # Trigger recovery via callback
+        if self._crash_recovery_callback:
+            try:
+                await self._crash_recovery_callback(session)
+            except Exception as e:
+                logger.error(f"Crash recovery failed for session {session.id}: {e}")
+        else:
+            logger.warning(f"No crash recovery callback set, cannot recover session {session.id}")
 
     async def _check_idle(self, session: Session):
         """Check if session has been idle too long."""

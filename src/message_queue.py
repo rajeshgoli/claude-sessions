@@ -71,6 +71,9 @@ class MessageQueueManager:
         # Per-session delivery locks to prevent double-delivery race condition
         self._delivery_locks: Dict[str, asyncio.Lock] = {}
 
+        # Sessions paused for recovery (delivery blocked until unpaused)
+        self._paused_sessions: set[str] = set()
+
         # Background task
         self._running = False
         self._monitor_task: Optional[asyncio.Task] = None
@@ -292,6 +295,34 @@ class MessageQueueManager:
         """Check if a session is idle."""
         state = self.delivery_states.get(session_id)
         return state.is_idle if state else False
+
+    def pause_session(self, session_id: str):
+        """
+        Pause message delivery to a session (used during crash recovery).
+
+        While paused, messages remain queued but delivery is blocked.
+        This prevents sm send from going to bash during harness restart.
+        """
+        self._paused_sessions.add(session_id)
+        logger.info(f"Session {session_id} paused for recovery")
+
+    def unpause_session(self, session_id: str):
+        """
+        Resume message delivery to a session after recovery.
+
+        Triggers immediate delivery check if session is idle.
+        """
+        self._paused_sessions.discard(session_id)
+        logger.info(f"Session {session_id} unpaused after recovery")
+
+        # Trigger delivery check if session is idle
+        state = self.delivery_states.get(session_id)
+        if state and state.is_idle:
+            asyncio.create_task(self._try_deliver_messages(session_id))
+
+    def is_session_paused(self, session_id: str) -> bool:
+        """Check if a session is paused for recovery."""
+        return session_id in self._paused_sessions
 
     def _get_or_create_state(self, session_id: str) -> SessionDeliveryState:
         """Get or create delivery state for a session."""
@@ -633,6 +664,11 @@ class MessageQueueManager:
             session_id: Target session ID
             important_only: Only deliver important mode messages
         """
+        # Skip delivery if session is paused for recovery
+        if session_id in self._paused_sessions:
+            logger.debug(f"Session {session_id} paused for recovery, skipping delivery")
+            return
+
         # Acquire per-session lock to prevent concurrent delivery
         lock = self._delivery_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
@@ -728,6 +764,11 @@ class MessageQueueManager:
 
     async def _deliver_urgent(self, session_id: str, msg: QueuedMessage):
         """Deliver an urgent message immediately, interrupting Claude."""
+        # Skip delivery if session is paused for recovery
+        if session_id in self._paused_sessions:
+            logger.debug(f"Session {session_id} paused for recovery, deferring urgent delivery")
+            return
+
         session = self.session_manager.get_session(session_id)
         if not session:
             logger.error(f"Session {session_id} not found for urgent delivery")

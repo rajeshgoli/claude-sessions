@@ -1002,3 +1002,110 @@ class SessionManager:
         return self.tmux.capture_pane(session.tmux_session, lines)
 
     # cleanup_dead_sessions() removed - OutputMonitor now handles detection and cleanup automatically
+
+    async def recover_session(self, session: Session) -> bool:
+        """
+        Recover a session from Claude Code harness crash.
+
+        This handles JavaScript stack overflow crashes in the TUI harness.
+        The agent (Anthropic backend) is unaffected - only the local harness crashed.
+
+        Recovery flow:
+        1. Pause message queue (prevent sm send going to bash)
+        2. Send /exit to cleanly shutdown crashed harness
+        3. Wait for shell prompt
+        4. Reset terminal with stty sane
+        5. Resume Claude with --resume <uuid>
+        6. Unpause message queue
+
+        Args:
+            session: Session to recover
+
+        Returns:
+            True if recovery successful, False otherwise
+        """
+        if session.provider != "claude":
+            logger.warning(f"Crash recovery only supported for Claude sessions, not {session.provider}")
+            return False
+
+        if not session.transcript_path:
+            logger.error(f"Cannot recover session {session.id}: no transcript_path for --resume")
+            return False
+
+        # Extract UUID from transcript path (e.g., /path/to/uuid.jsonl -> uuid)
+        resume_uuid = Path(session.transcript_path).stem
+
+        logger.info(f"Starting crash recovery for session {session.id} (resume UUID: {resume_uuid})")
+
+        # 1. Pause message queue
+        if self.message_queue_manager:
+            self.message_queue_manager.pause_session(session.id)
+
+        try:
+            # 2. Send /exit to shutdown crashed harness
+            logger.debug(f"Sending /exit to session {session.id}")
+            proc = await asyncio.create_subprocess_exec(
+                "tmux", "send-keys", "-t", session.tmux_session, "/exit", "Enter",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=5)
+
+            # 3. Wait for shell to be ready
+            await asyncio.sleep(2.0)
+
+            # 4. Reset terminal with stty sane
+            logger.debug(f"Sending stty sane to session {session.id}")
+            proc = await asyncio.create_subprocess_exec(
+                "tmux", "send-keys", "-t", session.tmux_session, "stty sane", "Enter",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=5)
+
+            await asyncio.sleep(0.5)
+
+            # 5. Build resume command with config args
+            claude_config = self.config.get("claude", {})
+            command = claude_config.get("command", "claude")
+            args = claude_config.get("args", [])
+
+            # Build full command: claude [args] --resume <uuid>
+            resume_cmd = f"{command}"
+            if args:
+                resume_cmd += " " + " ".join(args)
+            resume_cmd += f" --resume {resume_uuid}"
+
+            logger.debug(f"Sending resume command to session {session.id}: {resume_cmd}")
+            proc = await asyncio.create_subprocess_exec(
+                "tmux", "send-keys", "-t", session.tmux_session, resume_cmd, "Enter",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=5)
+
+            # Wait for Claude to start
+            await asyncio.sleep(3.0)
+
+            # Update session state
+            session.recovery_count += 1
+            session.last_activity = datetime.now()
+            session.status = SessionStatus.IDLE  # Claude starts idle after resume
+            self._save_state()
+
+            logger.info(
+                f"Crash recovery complete for session {session.id} "
+                f"(recovery count: {session.recovery_count})"
+            )
+            return True
+
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout during crash recovery for session {session.id}")
+            return False
+        except Exception as e:
+            logger.error(f"Crash recovery failed for session {session.id}: {e}")
+            return False
+        finally:
+            # 6. Always unpause message queue (even on failure)
+            if self.message_queue_manager:
+                self.message_queue_manager.unpause_session(session.id)

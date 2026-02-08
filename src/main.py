@@ -177,6 +177,7 @@ class SessionManagerApp:
         self.output_monitor.set_status_callback(self._handle_status_change)
         self.output_monitor.set_save_state_callback(self.session_manager._save_state)
         self.output_monitor.set_session_manager(self.session_manager)
+        self.output_monitor.set_crash_recovery_callback(self.session_manager.recover_session)
 
         # Child monitor for --wait functionality
         self.child_monitor = ChildMonitor(self.session_manager)
