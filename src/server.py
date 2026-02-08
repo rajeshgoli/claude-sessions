@@ -1463,13 +1463,7 @@ Or continue working if not done yet."""
         if app.state.output_monitor and getattr(child_session, "provider", "claude") != "codex-app":
             await app.state.output_monitor.start_monitoring(child_session)
 
-        # Register for --wait monitoring if specified
-        if request.wait and app.state.child_monitor:
-            app.state.child_monitor.register_child(
-                child_session_id=child_session.id,
-                parent_session_id=request.parent_session_id,
-                wait_seconds=request.wait,
-            )
+        # Note: --wait monitoring is already registered by session_manager.spawn_child_session()
 
         return {
             "session_id": child_session.id,
