@@ -580,7 +580,8 @@ class SessionManager:
 
         # Codex CLI sessions have no hooks, so queue-based idle detection
         # never triggers. Deliver directly into the tmux input box.
-        if session.provider == "codex":
+        # Urgent mode still goes through the queue so it can send Escape first.
+        if session.provider == "codex" and delivery_mode != "urgent":
             success = await self._deliver_direct(session, formatted_text)
             if success:
                 session.last_activity = datetime.now()
