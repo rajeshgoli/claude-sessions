@@ -1452,9 +1452,16 @@ Or continue working if not done yet."""
                             if app.state.output_monitor:
                                 app.state.output_monitor.mark_response_sent(target_session.id)
                 else:
-                    if sid:
-                        app.state.pending_stop_notifications.discard(sid)
-                    logger.debug(f"Skipping idle_prompt notification (filtered out)")
+                    # Only clear pending state if the session is NOT awaiting
+                    # a deferred notification (i.e. it was never pending, or
+                    # was pending but last_message is empty — keep it pending
+                    # so a later hook can still deliver the content).
+                    if sid and sid not in app.state.pending_stop_notifications:
+                        logger.debug(f"Skipping idle_prompt notification for {sid} (filtered out)")
+                    elif sid and sid in app.state.pending_stop_notifications:
+                        logger.info(f"idle_prompt for {sid} had empty transcript, keeping deferred state")
+                    else:
+                        logger.debug(f"Skipping idle_prompt notification (filtered out)")
                 return {"status": "received", "hook_event": hook_event}
 
             # Send notification to Telegram for permission prompts and errors
