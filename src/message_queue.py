@@ -399,9 +399,21 @@ class MessageQueueManager:
         queue_len = self.get_queue_length(target_session_id)
         logger.info(f"Queued message {msg.id} for {target_session_id} (mode={delivery_mode}, queue={queue_len})")
 
+        # Codex CLI sessions have no hooks so idle detection never triggers.
+        # Force immediate delivery for all non-urgent modes.
+        session = self.session_manager.get_session(target_session_id)
+        is_codex = session and getattr(session, "provider", "claude") == "codex"
+
         # If urgent mode, trigger immediate delivery
         if delivery_mode == "urgent":
             asyncio.create_task(self._deliver_urgent(target_session_id, msg))
+        elif is_codex:
+            # Codex: set idle flag and deliver immediately, but skip the
+            # stop-notification side effects of mark_session_idle() since
+            # this isn't a real stop event.
+            state = self._get_or_create_state(target_session_id)
+            state.is_idle = True
+            asyncio.create_task(self._try_deliver_messages(target_session_id))
         # If important mode, trigger check (delivers when response complete)
         elif delivery_mode == "important":
             asyncio.create_task(self._try_deliver_messages(target_session_id, important_only=True))
@@ -414,7 +426,6 @@ class MessageQueueManager:
                 asyncio.create_task(self._try_deliver_messages(target_session_id))
             else:
                 # Check actual session status - IDLE sessions should receive messages
-                session = self.session_manager.get_session(target_session_id)
                 if session:
                     from .models import SessionStatus
                     if session.status == SessionStatus.IDLE:
