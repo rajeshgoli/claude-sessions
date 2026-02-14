@@ -578,6 +578,16 @@ class SessionManager:
                 notifier=self.notifier,
             ))
 
+        # Codex CLI sessions have no hooks, so queue-based idle detection
+        # never triggers. Deliver directly into the tmux input box.
+        if session.provider == "codex":
+            success = await self._deliver_direct(session, formatted_text)
+            if success:
+                session.last_activity = datetime.now()
+                session.status = SessionStatus.RUNNING
+                self._save_state()
+            return DeliveryResult.DELIVERED if success else DeliveryResult.FAILED
+
         # Handle delivery modes using the message queue manager
         if self.message_queue_manager:
             # Check if session is idle (will be delivered immediately)
