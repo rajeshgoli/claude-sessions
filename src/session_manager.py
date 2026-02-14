@@ -578,35 +578,6 @@ class SessionManager:
                 notifier=self.notifier,
             ))
 
-        # Codex CLI sessions have no hooks, so queue-based idle detection
-        # never triggers. Deliver directly into the tmux input box.
-        # Urgent mode still goes through the queue so it can send Escape first.
-        if session.provider == "codex" and delivery_mode != "urgent":
-            success = await self._deliver_direct(session, formatted_text)
-            if success:
-                session.last_activity = datetime.now()
-                session.status = SessionStatus.RUNNING
-                self._save_state()
-                # Fire notify callbacks that would normally be handled by the queue
-                if self.message_queue_manager and sender_session_id:
-                    from .models import QueuedMessage
-                    stub = QueuedMessage(
-                        target_session_id=session_id,
-                        sender_session_id=sender_session_id,
-                        sender_name=sender_name,
-                        text=formatted_text,
-                        notify_on_delivery=notify_on_delivery,
-                        notify_after_seconds=notify_after_seconds,
-                        notify_on_stop=notify_on_stop,
-                    )
-                    if notify_on_delivery:
-                        asyncio.create_task(
-                            self.message_queue_manager._send_delivery_notification(stub))
-                    if notify_after_seconds:
-                        asyncio.create_task(
-                            self.message_queue_manager._schedule_followup_notification(stub))
-            return DeliveryResult.DELIVERED if success else DeliveryResult.FAILED
-
         # Handle delivery modes using the message queue manager
         if self.message_queue_manager:
             # Check if session is idle (will be delivered immediately)
