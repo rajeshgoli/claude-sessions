@@ -1,6 +1,6 @@
 # #137 — Native Codex /review Support for Code Reviews
 
-**Status:** Draft v11
+**Status:** Draft v12
 **Author:** Claude (Opus 4.6)
 **Created:** 2026-02-14
 **Updated:** 2026-02-14
@@ -881,14 +881,14 @@ Since `AGENTS.md → CLAUDE.md`, Codex GitHub reviews will automatically pick up
 **File:** `src/github_reviews.py` (new)
 
 ```python
-async def post_pr_review_comment(
+def post_pr_review_comment(
     repo: str,
     pr_number: int,
     steer: Optional[str] = None,
 ) -> dict:
-    """Post @codex review comment on a PR.
+    """Post @codex review comment on a PR. Synchronous (subprocess.run).
 
-    Returns: {"comment_id": int, "body": str}
+    Returns: {"comment_id": int, "body": str, "posted_at": str}
     """
 
 def poll_for_codex_review(
