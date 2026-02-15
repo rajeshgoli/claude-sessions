@@ -112,17 +112,21 @@ async def delete_topics(
                 logger.info(f"Progress: {i}/{len(to_delete)} ({deleted} deleted, {failed} failed)")
         except Exception as e:
             error_str = str(e)
-            if "TOPIC_NOT_MODIFIED" in error_str or "not found" in error_str.lower():
-                # Already deleted or doesn't exist — count as success
+            # Only treat topic-specific "not found" as idempotent success;
+            # broader matches like "chat not found" indicate real failures.
+            if "TOPIC_NOT_MODIFIED" in error_str or "TOPIC_ID_INVALID" in error_str:
                 deleted += 1
             else:
                 failed += 1
-                logger.warning(f"Failed to delete topic {thread_id}: {e}")
+                logger.warning(f"Failed to delete topic {thread_id} in chat {chat_id}: {e}")
 
         # Rate limiting
         await asyncio.sleep(RATE_LIMIT_DELAY)
 
-    await bot.close()
+    # Shut down the HTTP client. Do NOT call bot.close() — that invokes the
+    # Telegram close API (bot migration control) which can disrupt the
+    # active bot instance and trigger 429 errors.
+    await bot.shutdown()
     return deleted, failed
 
 
@@ -190,12 +194,14 @@ async def main():
         )
         sys.exit(1)
 
-    # Deduplicate — same thread_id may appear multiple times in the log
-    seen = set()
+    # Deduplicate — same (chat_id, thread_id) may appear multiple times in
+    # the log.  Key on the tuple since thread IDs are scoped per chat.
+    seen: set[tuple[int, int]] = set()
     unique_topics = []
     for chat_id, thread_id in all_topics:
-        if thread_id not in seen:
-            seen.add(thread_id)
+        key = (chat_id, thread_id)
+        if key not in seen:
+            seen.add(key)
             unique_topics.append((chat_id, thread_id))
 
     logger.info(f"Unique topic IDs: {len(unique_topics)}")
