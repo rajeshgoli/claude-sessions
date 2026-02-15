@@ -150,6 +150,12 @@ async def main():
         default="/tmp/claude-sessions/sessions.json",
         help="Path to sessions state file",
     )
+    parser.add_argument(
+        "--keep",
+        type=int,
+        default=None,
+        help="Explicit thread_id to keep (overrides state file lookup)",
+    )
     args = parser.parse_args()
 
     # Load config for bot token
@@ -172,9 +178,17 @@ async def main():
 
     logger.info(f"Found {len(all_topics)} topic(s) for session {args.session} in log")
 
-    # Determine which to keep
-    current_thread_id = get_current_thread_id(args.session, args.state_file)
+    # Determine which to keep — abort if unknown to avoid deleting the active topic
+    current_thread_id = args.keep or get_current_thread_id(args.session, args.state_file)
     logger.info(f"Currently persisted thread_id: {current_thread_id}")
+
+    if current_thread_id is None:
+        logger.error(
+            f"No persisted thread_id for session {args.session}. "
+            "Cannot determine which topic to keep — aborting to avoid deleting the active topic. "
+            "Fix the session state first or pass --keep <thread_id> to specify explicitly."
+        )
+        sys.exit(1)
 
     # Deduplicate — same thread_id may appear multiple times in the log
     seen = set()
