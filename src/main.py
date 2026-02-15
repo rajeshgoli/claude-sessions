@@ -466,8 +466,12 @@ class SessionManagerApp:
         # Pre-flight check: bail immediately if port is already in use.
         # This prevents side effects (Telegram API calls, monitoring restores)
         # from firing on doomed instances during crash-loop restarts.
+        # Use SO_REUSEADDR to match uvicorn's socket options — without it,
+        # TIME_WAIT sockets from a recently-exited instance would cause
+        # false positives (probe fails but uvicorn would succeed).
         import socket
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind((self.host, self.port))
         except OSError:
