@@ -326,14 +326,25 @@ When `--steer` is provided:
 3. Send the steer text
 4. Send `Enter` to submit
 
-**Via `sm send` (during or after review):**
+**Via `sm send --steer` (during review):**
 
-The EM can send follow-up instructions using the existing message queue:
+The EM agent can steer an active review mid-turn:
 ```bash
-sm send reviewer "Also check for SQL injection"
+sm send reviewer "Also check for SQL injection" --steer
 ```
 
-This uses `important` mode (the default), which waits for the session to go idle then delivers the text to the tmux pane. The user (or EM) then clicks the steer button in the Codex TUI to inject the delivered text into the active turn. No new delivery mode needed — the existing `sm send` + manual steer button click handles this.
+The `--steer` flag bypasses normal message queue delivery and instead calls `send_steer_text()` directly on the target session's tmux pane: Enter (open steer field) → text → Enter (submit). This injects instructions into the **current** Codex turn without waiting for idle.
+
+This is required because the EM is an agent — it cannot manually click the steer button in the Codex TUI. The `--steer` flag automates the full steer sequence.
+
+**`--steer` vs other delivery modes:**
+
+| Mode | When it delivers | How | Use case |
+|------|-----------------|-----|----------|
+| `--sequential` (default) | When session is idle | Normal prompt injection | Post-review follow-up |
+| `--important` | When session is idle (priority) | Normal prompt injection | Notifications |
+| `--urgent` | Immediately (sends Escape first) | Interrupts current turn | Emergency |
+| `--steer` | Immediately (sends Enter first) | Injects into current turn | Mid-review focus change |
 
 ### 3.6 Review Session Model
 
@@ -817,6 +828,39 @@ Validation and defaulting:
 - If no `parent_session_id` and no `--new`, runs standalone (review on existing session, no parent tracking)
 - **`--wait` defaulting:** If `wait` is None and caller has session context (`parent_session_id` is set), default to 600. If no session context, leave as None (no watching). This avoids spurious warnings for standalone users who never asked to wait. Same rule applies for `--pr` mode.
 
+#### Step 5b: Add `--steer` delivery mode to `sm send`
+
+The EM agent needs to steer active reviews mid-turn. Since the EM is an agent (not a human at the TUI), it cannot click the Codex steer button manually. The `--steer` flag on `sm send` automates the full steer sequence.
+
+**File:** `src/cli/main.py`
+
+Add `--steer` flag to existing `send` subparser:
+```python
+send_parser.add_argument("--steer", action="store_true",
+    help="Inject text into active Codex turn via steer (Enter → text → Enter)")
+```
+
+**File:** `src/message_queue.py`
+
+Add steer delivery path. When `delivery_mode == "steer"`:
+1. Skip normal message queue entirely
+2. Resolve target session's tmux pane name
+3. Call `tmux_controller.send_steer_text(session_name, text)` directly
+4. Return immediately — no idle detection, no queueing
+
+This reuses `send_steer_text()` from Step 2 (tmux controller). The steer mode is intentionally simple — it's a direct tmux send-keys operation, not a queued message.
+
+**File:** `src/models.py`
+
+Add to `DeliveryMode` enum:
+```python
+class DeliveryMode(Enum):
+    SEQUENTIAL = "sequential"
+    IMPORTANT = "important"
+    URGENT = "urgent"
+    STEER = "steer"  # Enter-based injection into active Codex turn
+```
+
 #### Step 6: Add API client methods
 
 **File:** `src/cli/client.py`
@@ -1008,13 +1052,14 @@ This keeps the server stateless for standalone invocations while giving the CLI 
 
 | File | Change |
 |------|--------|
-| `src/models.py` | Add `ReviewConfig` dataclass (with `pr_number`, `pr_repo`, `pr_comment_id` fields); add `review_config` field to `Session` |
+| `src/models.py` | Add `ReviewConfig` dataclass (with `pr_number`, `pr_repo`, `pr_comment_id` fields); add `review_config` field to `Session`; add `STEER` to `DeliveryMode` enum |
 | `src/tmux_controller.py` | Add `send_review_sequence()` and `send_steer_text()` async methods |
 | `src/session_manager.py` | Add `start_review()`, `spawn_review_session()`, and `start_pr_review()` methods |
 | `src/github_reviews.py` | **New file.** `gh` CLI wrapper: `post_pr_review_comment()`, `poll_for_codex_review()`, `get_pr_repo_from_git()` |
 | `src/server.py` | Add `StartReviewRequest`, `SpawnReviewRequest`, `PRReviewRequest` models and three endpoints |
 | `src/cli/commands.py` | Add `cmd_review()` function with `--pr` dispatch path |
-| `src/cli/main.py` | Add `review` subparser with `--pr` and `--repo` args, and dispatch |
+| `src/cli/main.py` | Add `review` subparser with `--pr` and `--repo` args; add `--steer` flag to existing `send` subparser |
+| `src/message_queue.py` | Add `steer` delivery path (bypass queue, call `send_steer_text()` directly) |
 | `src/cli/client.py` | Add `start_review()`, `spawn_review()`, and `start_pr_review()` API client methods |
 | `config.yaml` | Add `codex.review` configuration section |
 | *(target repo)* `CLAUDE.md` | Move review checklist here from `architect.md`; add "Review guidelines" section |
