@@ -326,14 +326,14 @@ When `--steer` is provided:
 3. Send the steer text
 4. Send `Enter` to submit
 
-**Via `sm send` (after review completes a turn):**
+**Via `sm send` (during or after review):**
 
 The EM can send follow-up instructions using the existing message queue:
 ```bash
 sm send reviewer "Also check for SQL injection"
 ```
 
-This uses `important` mode (the default), which waits for the session to go idle then injects. When the review turn completes and the session returns to the prompt, the message is delivered as a new prompt. No new delivery mode needed — the existing infrastructure handles this.
+This uses `important` mode (the default), which waits for the session to go idle then delivers the text to the tmux pane. The user (or EM) then clicks the steer button in the Codex TUI to inject the delivered text into the active turn. No new delivery mode needed — the existing `sm send` + manual steer button click handles this.
 
 ### 3.6 Review Session Model
 
