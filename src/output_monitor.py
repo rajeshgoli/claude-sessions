@@ -271,13 +271,15 @@ class OutputMonitor:
 
     async def _handle_permission_prompt(self, session: Session, content: str):
         """Handle detected permission prompt."""
+        # Always track permission state (even if notification is debounced)
+        self._awaiting_permission[session.id] = True
+
         # Debounce - don't notify twice within configured window
         last_notified = self._notified_permissions.get(session.id)
         if last_notified and datetime.now() - last_notified < timedelta(seconds=self._permission_debounce):
             return
 
         self._notified_permissions[session.id] = datetime.now()
-        self._awaiting_permission[session.id] = True
 
         # Update status to IDLE (waiting for user input)
         if self._status_callback:
@@ -392,6 +394,9 @@ class OutputMonitor:
             try:
                 success = await self._crash_recovery_callback(session)
                 self._last_crash_recovery[session.id] = (datetime.now(), bool(success))
+                if success:
+                    # Clear any stale pending state from earlier deferred attempts
+                    self._pending_crash_recovery.discard(session.id)
             except Exception as e:
                 logger.error(f"Crash recovery failed for session {session.id}: {e}")
                 self._last_crash_recovery[session.id] = (datetime.now(), False)
