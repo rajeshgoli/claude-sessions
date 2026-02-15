@@ -463,6 +463,19 @@ class SessionManagerApp:
         """Start all components."""
         logger.info("Starting Claude Session Manager...")
 
+        # Pre-flight check: bail immediately if port is already in use.
+        # This prevents side effects (Telegram API calls, monitoring restores)
+        # from firing on doomed instances during crash-loop restarts.
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind((self.host, self.port))
+        except OSError:
+            logger.error(f"Port {self.port} already in use, exiting without side effects")
+            return
+        finally:
+            sock.close()
+
         # Start child monitor
         await self.child_monitor.start()
         logger.info("Child monitor started")
@@ -478,10 +491,10 @@ class SessionManagerApp:
             self.telegram_bot.load_session_threads(self.session_manager.list_sessions())
             logger.info("Telegram bot started")
 
-        # NOTE: _reconcile_telegram_topics() and monitoring restoration are
-        # deferred to _post_bind_startup() via the ASGI lifespan hook.
-        # This ensures doomed instances (port already in use) exit before
-        # any Telegram API calls fire.
+        # NOTE: _reconcile_telegram_topics() and monitoring restoration run
+        # via the ASGI lifespan hook (_post_bind_startup).  The pre-flight
+        # socket probe above is the primary guard — it exits doomed instances
+        # before any side effects fire.
 
         # Start the web server
         config = uvicorn.Config(
