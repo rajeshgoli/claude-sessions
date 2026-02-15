@@ -1,6 +1,6 @@
 # #137 — Native Codex /review Support for Code Reviews
 
-**Status:** Draft v8
+**Status:** Draft v9
 **Author:** Claude (Opus 4.6)
 **Created:** 2026-02-14
 **Updated:** 2026-02-14
@@ -429,8 +429,9 @@ Triggers a `@codex review` on a GitHub PR. No session required.
   "repo": "rajeshgoli/fractal-market-simulator",
   "comment_id": 12345678,
   "comment_body": "@codex review for Focus on auth security",
+  "posted_at": "2026-02-14T10:30:00Z",
   "status": "posted",
-  "polling": true
+  "server_polling": true
 }
 ```
 
@@ -540,13 +541,15 @@ For `--pr` mode, `ReviewConfig` (defined in section 3.6 with `pr_number`, `pr_re
 
 **`--wait` contract for PR mode:**
 
-| Invocation | Behavior |
-|------------|----------|
-| `sm review --pr 42 --wait 600` (with `CLAUDE_SESSION_MANAGER_ID` set) | Poll for review; on completion, `sm send` notification to caller session |
-| `sm review --pr 42 --wait 600` (standalone, no session context) | Poll for review; on completion, print result to stdout and exit 0 |
-| `sm review --pr 42` (no `--wait`) | Fire-and-forget: post comment and return immediately |
+| Invocation | Who polls | Behavior |
+|------------|-----------|----------|
+| `sm review --pr 42 --wait 600` (with `CLAUDE_SESSION_MANAGER_ID` set) | **Server** (background task) | API returns immediately. Server polls `gh api` in background. On completion, notifies caller session via `sm send`. |
+| `sm review --pr 42 --wait 600` (standalone, no session context) | **CLI** (blocking) | API returns immediately with `posted_at` timestamp. CLI blocks and polls `gh api` directly using `poll_for_codex_review()`. Prints result to stdout on completion, exits 0. On timeout, exits 1. |
+| `sm review --pr 42` (no `--wait`) | Nobody | Fire-and-forget: API posts comment and returns immediately. No polling. |
 
-This matches the local TUI mode behavior: `--wait` defaults to 600 when caller has session context, None otherwise. The difference is that PR mode uses `poll_pr_review()` (GitHub API polling) instead of `watch_session()` (tmux idle detection). The two completion paths are completely decoupled — PR mode never calls `watch_session()`.
+**Execution model split:** The server never blocks on long polls. For managed sessions, the server owns the poll lifecycle (background `asyncio.Task`). For standalone CLI invocations, the CLI owns the poll lifecycle (synchronous loop). Both use the same `poll_for_codex_review()` function from `github_reviews.py` — it's callable from both server and CLI contexts.
+
+This matches the local TUI mode behavior: `--wait` defaults to 600 when caller has session context, None otherwise. PR mode uses `poll_for_codex_review()` (GitHub API polling) instead of `watch_session()` (tmux idle detection). The two completion paths are completely decoupled — PR mode never calls `watch_session()`.
 
 **PR completion notification format:**
 ```
@@ -934,10 +937,11 @@ async def start_pr_review(
 This method:
 1. Resolves repo from `--repo` flag or working directory
 2. Validates PR exists and is open via `gh pr view`
-3. If `caller_session_id` provided: stores `ReviewConfig` (mode=`"pr"`, `pr_number`, `pr_repo`) on caller's session. If absent (standalone), no persistence — state lives only in the background poll task.
+3. If `caller_session_id` provided: stores `ReviewConfig` (mode=`"pr"`, `pr_number`, `pr_repo`) on caller's session. If absent (standalone), no persistence.
 4. Posts `@codex review` comment (with optional steer text appended). Stores `pr_comment_id` on ReviewConfig if persisted.
-5. If `wait`: starts background poll task for Codex review completion
-6. On completion: if `caller_session_id`, notifies via `sm send`; if standalone, prints result to stdout
+5. Returns response dict including `posted_at` (ISO timestamp of when comment was posted) — needed by CLI for client-side polling.
+6. If `wait` **and** `caller_session_id`: starts server-side background poll task (`asyncio.create_task`). On completion, notifies caller via `sm send`.
+7. If `wait` **without** `caller_session_id`: server does **not** start a poll task. The CLI is responsible for polling (see Step 12). The API response contains everything the CLI needs to poll independently (`repo`, `pr_number`, `posted_at`).
 
 #### Step 11: Add PR review API endpoint
 
@@ -967,8 +971,34 @@ review_parser.add_argument("--repo", help="GitHub repo (owner/repo) for --pr mod
 ```
 
 Dispatch logic update:
-- If `--pr` is set: call `start_pr_review()` — no session argument needed
+- If `--pr` is set: call `start_pr_review()` via API — no session argument needed
 - `--pr` is mutually exclusive with `--base`, `--uncommitted`, `--commit`, `--custom`, `--new`
+
+**Standalone `--wait` polling (CLI-side):**
+
+When `--pr` + `--wait` is used without session context (`CLAUDE_SESSION_MANAGER_ID` not set), the CLI owns the poll lifecycle:
+
+```python
+# In cmd_review(), after API call returns:
+response = client.start_pr_review(pr_number=pr, repo=repo, steer=steer)
+if wait and not caller_session_id:
+    # Server did NOT start polling — CLI polls directly
+    from src.github_reviews import poll_for_codex_review
+    result = poll_for_codex_review(
+        repo=response["repo"],
+        pr_number=response["pr_number"],
+        since=response["posted_at"],
+        timeout=wait,
+    )
+    if result:
+        print(f"Codex review posted on PR #{pr}: {result['state']}")
+        return 0
+    else:
+        print(f"Timeout: no Codex review found after {wait}s")
+        return 1
+```
+
+This keeps the server stateless for standalone invocations while giving the CLI user a blocking wait experience.
 
 ### Phase 2: Deferred Steering & Output Parsing (follow-up)
 
