@@ -1323,6 +1323,14 @@ Provide ONLY the summary, no preamble or questions."""
                 import asyncio
                 asyncio.create_task(queue_mgr._restore_user_input_after_response(session_manager_id))
 
+            # Keep session.status in sync with delivery_state.is_idle
+            if app.state.session_manager:
+                target_session = app.state.session_manager.get_session(session_manager_id)
+                if target_session and target_session.status != SessionStatus.STOPPED:
+                    app.state.session_manager.update_session_status(
+                        session_manager_id, SessionStatus.IDLE
+                    )
+
             # Always keep transcript_path up to date (needed for crash recovery)
             if transcript_path and app.state.session_manager:
                 target = app.state.session_manager.get_session(session_manager_id)
