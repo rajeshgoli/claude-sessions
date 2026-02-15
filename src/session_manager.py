@@ -432,7 +432,8 @@ class SessionManager:
                 )
                 if thread_id:
                     session.telegram_thread_id = thread_id
-                    changed = True
+                    self._save_state()  # Persist IMMEDIATELY — minimize race window
+                    changed = False     # Already saved; prevent redundant outer save
                     logger.info(
                         f"Auto-created topic for session {session.id}: "
                         f"chat={session.telegram_chat_id}, thread={thread_id}"

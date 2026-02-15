@@ -7,6 +7,7 @@ import signal
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -201,6 +202,16 @@ class SessionManagerApp:
         db_path = tool_logging_config.get("db_path", "~/.local/share/claude-sessions/tool_usage.db")
         self.tool_logger = ToolLogger(db_path=db_path)
 
+        # Create ASGI lifespan — runs post-bind work only after uvicorn
+        # successfully binds the port.  Doomed instances (port already in use)
+        # exit before the lifespan fires, so no Telegram API calls leak.
+        sm_app = self
+
+        @asynccontextmanager
+        async def _lifespan(app):
+            await sm_app._post_bind_startup()
+            yield
+
         # Create FastAPI app
         self.app = create_app(
             session_manager=self.session_manager,
@@ -208,6 +219,7 @@ class SessionManagerApp:
             output_monitor=self.output_monitor,
             child_monitor=self.child_monitor,
             config=config,  # Pass config for server timeout settings
+            lifespan=_lifespan,
         )
 
         # Attach tool logger to app state
@@ -413,6 +425,31 @@ class SessionManagerApp:
             if session.telegram_chat_id and not session.telegram_thread_id:
                 await self.session_manager._ensure_telegram_topic(session)
 
+    async def _post_bind_startup(self):
+        """Run side-effect-bearing startup work after uvicorn binds the port.
+
+        Called from the ASGI lifespan hook so that doomed instances
+        (port already in use) never reach this code.
+        """
+        # Reconcile Telegram topics
+        if self.telegram_bot:
+            await self._reconcile_telegram_topics()
+
+        # Restore monitoring for existing sessions
+        await self._restore_monitoring()
+
+    async def _restore_monitoring(self):
+        """Restore output monitoring for sessions that were running before restart."""
+        for session in self.session_manager.list_sessions():
+            if session.status != SessionStatus.STOPPED:
+                if session.provider != "codex-app":
+                    await self.output_monitor.start_monitoring(session, is_restored=True)
+                    logger.info(f"Restored monitoring for session {session.name}")
+
+                    # Update tmux status bar if friendly name exists
+                    if session.friendly_name:
+                        self.session_manager.tmux.set_status_bar(session.tmux_session, session.friendly_name)
+
     async def _handle_monitor_event(self, event: NotificationEvent):
         """Handle events from the output monitor."""
         session = self.session_manager.get_session(event.session_id)
@@ -441,19 +478,10 @@ class SessionManagerApp:
             self.telegram_bot.load_session_threads(self.session_manager.list_sessions())
             logger.info("Telegram bot started")
 
-            # Reconcile topics: delete orphans, backfill chat_id, create missing topics
-            await self._reconcile_telegram_topics()
-
-        # Restore monitoring for existing sessions
-        for session in self.session_manager.list_sessions():
-            if session.status != SessionStatus.STOPPED:
-                if session.provider != "codex-app":
-                    await self.output_monitor.start_monitoring(session, is_restored=True)
-                    logger.info(f"Restored monitoring for session {session.name}")
-
-                    # Update tmux status bar if friendly name exists
-                    if session.friendly_name:
-                        self.session_manager.tmux.set_status_bar(session.tmux_session, session.friendly_name)
+        # NOTE: _reconcile_telegram_topics() and monitoring restoration are
+        # deferred to _post_bind_startup() via the ASGI lifespan hook.
+        # This ensures doomed instances (port already in use) exit before
+        # any Telegram API calls fire.
 
         # Start the web server
         config = uvicorn.Config(

@@ -220,6 +220,7 @@ def create_app(
     output_monitor=None,
     child_monitor=None,
     config: Optional[dict] = None,
+    lifespan=None,
 ) -> FastAPI:
     """
     Create the FastAPI application.
@@ -230,6 +231,7 @@ def create_app(
         output_monitor: OutputMonitor instance
         child_monitor: ChildMonitor instance
         config: Configuration dictionary
+        lifespan: Optional ASGI lifespan context manager
 
     Returns:
         Configured FastAPI app
@@ -238,6 +240,7 @@ def create_app(
         title="Claude Session Manager",
         description="Manage Claude Code sessions with Telegram/Email notifications",
         version="0.1.0",
+        lifespan=lifespan,
     )
 
     # Store config first so middleware can access it
