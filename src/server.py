@@ -1285,6 +1285,13 @@ Provide ONLY the summary, no preamble or questions."""
                 import asyncio
                 asyncio.create_task(queue_mgr._restore_user_input_after_response(session_manager_id))
 
+            # Always keep transcript_path up to date (needed for crash recovery)
+            if transcript_path and app.state.session_manager:
+                target = app.state.session_manager.get_session(session_manager_id)
+                if target and target.transcript_path != transcript_path:
+                    target.transcript_path = transcript_path
+                    app.state.session_manager._save_state()
+
             # Auto-release locks and check for cleanup
             if app.state.session_manager:
                 session = app.state.session_manager.get_session(session_manager_id)

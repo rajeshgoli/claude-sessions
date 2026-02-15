@@ -1047,14 +1047,14 @@ class SessionManager:
                 await asyncio.wait_for(proc.communicate(), timeout=5)
                 await asyncio.sleep(0.5)
 
-            # 3. Wait for shell to be ready and capture output
-            await asyncio.sleep(1.0)
+            # 3. Wait for Claude to print exit message (crash dump is large)
+            await asyncio.sleep(3.0)
 
             # 4. Parse resume ID from Claude's exit output
             #    Claude prints: "To resume this conversation, run:\n  claude --resume <uuid>"
             resume_uuid = None
             proc = await asyncio.create_subprocess_exec(
-                "tmux", "capture-pane", "-p", "-t", session.tmux_session, "-S", "-50",
+                "tmux", "capture-pane", "-p", "-t", session.tmux_session, "-S", "-200",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
