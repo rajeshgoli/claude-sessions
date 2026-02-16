@@ -61,16 +61,12 @@ When a session is cleared, invalidate the stale cached output and related notifi
      - `delivery_states[session_id].stop_notify_sender_name = None`
 
 2. **In `cmd_clear` CLI path** (commands.py:1587-1743):
-   - Route tmux-session clears through the server's `/sessions/{session_id}/clear` endpoint instead of operating on tmux directly. This ensures the server always knows when a clear happens and can invalidate its caches. Alternatively, add a dedicated lightweight endpoint for cache invalidation that `cmd_clear` calls after the tmux operations.
-
-### Alternative: clear in `_send_stop_notification` itself
-
-Instead of (or in addition to) clearing on `sm clear`, `_send_stop_notification` could validate that the cached message is from the current task. However, there is no task-level identifier stored alongside the cached message, making freshness validation impractical without additional bookkeeping. Clearing on `sm clear` is simpler and more direct.
+   - After the tmux clear operations succeed, call a lightweight cache-invalidation endpoint (e.g. `POST /sessions/{session_id}/invalidate-cache`) to clear server-side state. This keeps the existing CLI tmux logic intact — the only missing piece is notifying the server that a clear happened. Routing the entire clear through the server endpoint would be a larger refactor (CLI uses synchronous subprocess + sleep, server uses async) with no added benefit.
 
 ## Scope
 
 - `src/server.py` — `/sessions/{session_id}/clear` endpoint: add cache invalidation for `last_claude_output`, `pending_stop_notifications`, and `stop_notify_sender_id`
-- `src/cli/commands.py` — `cmd_clear()`: route tmux clears through server endpoint, or call a cache-invalidation endpoint after tmux operations
+- `src/cli/commands.py` — `cmd_clear()`: add cache-invalidation API call after tmux operations
 - `src/session_manager.py` — no changes needed (handles tmux operations only)
 - `src/message_queue.py` — no changes needed (reads from `hook_output_store` which will now be correctly invalidated; `stop_notify_sender_id` cleared by server endpoint)
 
@@ -80,4 +76,8 @@ Instead of (or in addition to) clearing on `sm clear`, `_send_stop_notification`
 
 2. **Deferred notifications via `idle_prompt`**: If Task 1's Stop hook was deferred (added to `pending_stop_notifications`) and then `sm clear` is called before the `idle_prompt` hook fires, clearing `pending_stop_notifications` prevents the deferred path from sending Task 1's message during Task 2. This is correct behavior.
 
-3. **CLI path (tmux sessions)**: Currently `cmd_clear` for tmux sessions never calls the server. The fix should route through the server to clear cached state, or alternatively add a dedicated lightweight endpoint for cache invalidation that `cmd_clear` calls after the tmux operations.
+3. **CLI path (tmux sessions)**: Currently `cmd_clear` for tmux sessions never calls the server. After tmux operations, `cmd_clear` calls the cache-invalidation endpoint to clear server-side state.
+
+## Ticket Classification
+
+**Single ticket.** The fix touches two files (`src/server.py` endpoint + `src/cli/commands.py` CLI path) with a small, focused change. One agent can complete this without compacting context.
