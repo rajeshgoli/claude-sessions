@@ -1,6 +1,7 @@
 """tmux operations for spawning and controlling Claude Code sessions."""
 
 import asyncio
+import shlex
 import subprocess
 import shutil
 from pathlib import Path
@@ -120,6 +121,14 @@ class TmuxController:
             )
 
             # Set up environment variables first (persists in the shell)
+            # Unset CLAUDECODE to allow spawning Claude Code in child sessions
+            # (Claude Code sets this to detect nested sessions, but our tmux sessions are independent)
+            self._run_tmux(
+                "send-keys",
+                "-t", session_name,
+                "unset CLAUDECODE",
+                "Enter",
+            )
             # Workaround for Claude Code bug: ToolSearch infinite loop (issues #20329, #20468, #20982)
             self._run_tmux(
                 "send-keys",
@@ -214,6 +223,13 @@ class TmuxController:
             )
 
             # Set up environment variables first (persists in the shell)
+            # Unset CLAUDECODE to allow spawning Claude Code in child sessions
+            self._run_tmux(
+                "send-keys",
+                "-t", session_name,
+                "unset CLAUDECODE",
+                "Enter",
+            )
             # Workaround for Claude Code bug: ToolSearch infinite loop (issues #20329, #20468, #20982)
             self._run_tmux(
                 "send-keys",
@@ -243,6 +259,13 @@ class TmuxController:
                 # Add model flag (e.g., --model sonnet)
                 cmd_parts.extend(["--model", model])
 
+            # Pass initial prompt as a CLI positional argument instead of typing
+            # it via send-keys after startup. This avoids timing issues where
+            # Claude Code hasn't finished initializing when the prompt arrives.
+            if initial_prompt:
+                cmd_parts.append("--")
+                cmd_parts.append(shlex.quote(initial_prompt))
+
             # Start Claude Code in the session
             self._run_tmux(
                 "send-keys",
@@ -251,33 +274,15 @@ class TmuxController:
                 "Enter",
             )
 
-            # Send initial prompt if provided
             if initial_prompt:
-                # Wait longer for Claude to fully initialize and be ready to accept input
-                # Claude Code can take 2-3 seconds to start up and show the prompt
-                import time
-                time.sleep(self.claude_init_seconds)
-                # Send the prompt using subprocess with list arguments (security: prevent shell injection)
-                subprocess.run(
-                    ["tmux", "send-keys", "-t", session_name, "--", initial_prompt],
-                    check=True,
-                    capture_output=True,
-                    text=True
-                )
-                time.sleep(self.claude_init_no_prompt_seconds)
-                subprocess.run(
-                    ["tmux", "send-keys", "-t", session_name, "Enter"],
-                    check=True,
-                    capture_output=True,
-                    text=True
-                )
-                logger.info(f"Sent initial prompt to {session_name}: {initial_prompt[:50]}...")
+                logger.info(f"Created session with CLI prompt for {session_name} (prompt_len={len(initial_prompt)})")
             else:
-                # Still wait for Claude to start even without initial prompt
                 import time
                 time.sleep(self.claude_init_no_prompt_seconds)
 
-            logger.info(f"Created child session {session_name} (id={session_id}) with command {' '.join(cmd_parts)}")
+            # Log command without prompt payload to avoid leaking sensitive content
+            log_parts = [p for p in cmd_parts if p != "--" and p != shlex.quote(initial_prompt)] if initial_prompt else cmd_parts
+            logger.info(f"Created child session {session_name} (id={session_id}) with command {' '.join(log_parts)}")
             return True
 
         except subprocess.CalledProcessError as e:
