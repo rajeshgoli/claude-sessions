@@ -120,6 +120,14 @@ class TmuxController:
             )
 
             # Set up environment variables first (persists in the shell)
+            # Unset CLAUDECODE to allow spawning Claude Code in child sessions
+            # (Claude Code sets this to detect nested sessions, but our tmux sessions are independent)
+            self._run_tmux(
+                "send-keys",
+                "-t", session_name,
+                "unset CLAUDECODE",
+                "Enter",
+            )
             # Workaround for Claude Code bug: ToolSearch infinite loop (issues #20329, #20468, #20982)
             self._run_tmux(
                 "send-keys",
@@ -214,6 +222,13 @@ class TmuxController:
             )
 
             # Set up environment variables first (persists in the shell)
+            # Unset CLAUDECODE to allow spawning Claude Code in child sessions
+            self._run_tmux(
+                "send-keys",
+                "-t", session_name,
+                "unset CLAUDECODE",
+                "Enter",
+            )
             # Workaround for Claude Code bug: ToolSearch infinite loop (issues #20329, #20468, #20982)
             self._run_tmux(
                 "send-keys",
