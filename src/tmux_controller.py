@@ -263,6 +263,7 @@ class TmuxController:
             # it via send-keys after startup. This avoids timing issues where
             # Claude Code hasn't finished initializing when the prompt arrives.
             if initial_prompt:
+                cmd_parts.append("--")
                 cmd_parts.append(shlex.quote(initial_prompt))
 
             # Start Claude Code in the session
@@ -274,12 +275,14 @@ class TmuxController:
             )
 
             if initial_prompt:
-                logger.info(f"Created session with CLI prompt for {session_name}: {initial_prompt[:50]}...")
+                logger.info(f"Created session with CLI prompt for {session_name} (prompt_len={len(initial_prompt)})")
             else:
                 import time
                 time.sleep(self.claude_init_no_prompt_seconds)
 
-            logger.info(f"Created child session {session_name} (id={session_id}) with command {' '.join(cmd_parts)}")
+            # Log command without prompt payload to avoid leaking sensitive content
+            log_parts = [p for p in cmd_parts if p != "--" and p != shlex.quote(initial_prompt)] if initial_prompt else cmd_parts
+            logger.info(f"Created child session {session_name} (id={session_id}) with command {' '.join(log_parts)}")
             return True
 
         except subprocess.CalledProcessError as e:
