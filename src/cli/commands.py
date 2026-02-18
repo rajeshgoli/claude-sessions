@@ -1740,9 +1740,18 @@ def cmd_clear(
         # Wait for Claude to show idle prompt before sending payload (#175)
         _wait_for_claude_prompt(tmux_session)
 
-        # Send clear command + Enter atomically (#175 Bug B)
+        # Send clear command, then Enter as a separate call after a settle delay (#178).
+        # Sending text+"\r" atomically fails because Claude Code (Node.js TUI in raw
+        # mode) treats the rapid burst as pasted text, in which \r is literal, not submit.
         subprocess.run(
-            ["tmux", "send-keys", "-t", tmux_session, "--", clear_command + "\r"],
+            ["tmux", "send-keys", "-t", tmux_session, "--", clear_command],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        time.sleep(0.3)  # Settle delay: allow paste mode to end before Enter arrives
+        subprocess.run(
+            ["tmux", "send-keys", "-t", tmux_session, "Enter"],
             check=True,
             capture_output=True,
             text=True,
@@ -1754,7 +1763,14 @@ def cmd_clear(
         # Send new prompt if provided
         if new_prompt:
             subprocess.run(
-                ["tmux", "send-keys", "-t", tmux_session, "--", new_prompt + "\r"],
+                ["tmux", "send-keys", "-t", tmux_session, "--", new_prompt],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            time.sleep(0.3)  # Settle delay (#178)
+            subprocess.run(
+                ["tmux", "send-keys", "-t", tmux_session, "Enter"],
                 check=True,
                 capture_output=True,
                 text=True,
