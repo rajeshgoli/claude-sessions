@@ -368,76 +368,76 @@ class TestCodexIdleDetection:
     """Tests for Codex CLI idle detection in _watch_for_idle (#168)."""
 
     @pytest.mark.asyncio
-    async def test_check_codex_prompt_bare_chevron(self, message_queue):
-        """_check_codex_prompt returns True for bare '>' prompt."""
+    async def test_check_idle_prompt_bare_chevron(self, message_queue):
+        """_check_idle_prompt returns True for bare '>' prompt."""
         mock_proc = AsyncMock()
         mock_proc.communicate = AsyncMock(return_value=(b"some output\n>", b""))
         mock_proc.returncode = 0
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-            result = await message_queue._check_codex_prompt("tmux-codex")
+            result = await message_queue._check_idle_prompt("tmux-codex")
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_check_codex_prompt_with_trailing_space(self, message_queue):
-        """_check_codex_prompt returns True for '> ' prompt (no user text)."""
+    async def test_check_idle_prompt_with_trailing_space(self, message_queue):
+        """_check_idle_prompt returns True for '> ' prompt (no user text)."""
         mock_proc = AsyncMock()
         mock_proc.communicate = AsyncMock(return_value=(b"some output\n> ", b""))
         mock_proc.returncode = 0
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-            result = await message_queue._check_codex_prompt("tmux-codex")
+            result = await message_queue._check_idle_prompt("tmux-codex")
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_check_codex_prompt_with_user_text(self, message_queue):
-        """_check_codex_prompt returns False when user has typed text."""
+    async def test_check_idle_prompt_with_user_text(self, message_queue):
+        """_check_idle_prompt returns False when user has typed text."""
         mock_proc = AsyncMock()
         mock_proc.communicate = AsyncMock(return_value=(b"some output\n> hello world", b""))
         mock_proc.returncode = 0
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-            result = await message_queue._check_codex_prompt("tmux-codex")
+            result = await message_queue._check_idle_prompt("tmux-codex")
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_check_codex_prompt_no_prompt(self, message_queue):
-        """_check_codex_prompt returns False when no prompt visible."""
+    async def test_check_idle_prompt_no_prompt(self, message_queue):
+        """_check_idle_prompt returns False when no prompt visible."""
         mock_proc = AsyncMock()
         mock_proc.communicate = AsyncMock(return_value=(b"Processing task...\nDone.", b""))
         mock_proc.returncode = 0
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-            result = await message_queue._check_codex_prompt("tmux-codex")
+            result = await message_queue._check_idle_prompt("tmux-codex")
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_check_codex_prompt_empty_output(self, message_queue):
-        """_check_codex_prompt returns False for empty output."""
+    async def test_check_idle_prompt_empty_output(self, message_queue):
+        """_check_idle_prompt returns False for empty output."""
         mock_proc = AsyncMock()
         mock_proc.communicate = AsyncMock(return_value=(b"", b""))
         mock_proc.returncode = 0
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-            result = await message_queue._check_codex_prompt("tmux-codex")
+            result = await message_queue._check_idle_prompt("tmux-codex")
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_check_codex_prompt_tmux_error(self, message_queue):
-        """_check_codex_prompt returns False when tmux command fails."""
+    async def test_check_idle_prompt_tmux_error(self, message_queue):
+        """_check_idle_prompt returns False when tmux command fails."""
         mock_proc = AsyncMock()
         mock_proc.communicate = AsyncMock(return_value=(b"", b"no session"))
         mock_proc.returncode = 1
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-            result = await message_queue._check_codex_prompt("tmux-codex")
+            result = await message_queue._check_idle_prompt("tmux-codex")
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_check_codex_prompt_exception(self, message_queue):
-        """_check_codex_prompt returns False on exception."""
+    async def test_check_idle_prompt_exception(self, message_queue):
+        """_check_idle_prompt returns False on exception."""
         with patch("asyncio.create_subprocess_exec", side_effect=OSError("tmux not found")):
-            result = await message_queue._check_codex_prompt("tmux-codex")
+            result = await message_queue._check_idle_prompt("tmux-codex")
         assert result is False
 
     @pytest.mark.asyncio
@@ -457,19 +457,20 @@ class TestCodexIdleDetection:
         codex_session.tmux_session = "tmux-codex"
         codex_session.friendly_name = "test-codex"
         codex_session.name = "codex-agent"
+        codex_session.status = SessionStatus.RUNNING
         mock_session_manager.get_session = MagicMock(return_value=codex_session)
 
         # Simulate: first poll sees prompt, second poll sees prompt → idle
         prompt_results = [True, True]
         call_count = {"n": 0}
 
-        async def mock_check_codex_prompt(tmux_session):
+        async def mock_check_idle_prompt(tmux_session):
             idx = min(call_count["n"], len(prompt_results) - 1)
             result = prompt_results[idx]
             call_count["n"] += 1
             return result
 
-        mq._check_codex_prompt = mock_check_codex_prompt
+        mq._check_idle_prompt = mock_check_idle_prompt
 
         # Run watch with short timeout
         await mq._watch_for_idle("watch1", "codex123", "watcher456", timeout_seconds=5)
@@ -496,19 +497,20 @@ class TestCodexIdleDetection:
         codex_session.tmux_session = "tmux-codex"
         codex_session.friendly_name = "test-codex"
         codex_session.name = "codex-agent"
+        codex_session.status = SessionStatus.RUNNING
         mock_session_manager.get_session = MagicMock(return_value=codex_session)
 
         # Simulate: prompt visible once, then gone (transient), then timeout
         prompt_results = [True, False, False, False]
         call_count = {"n": 0}
 
-        async def mock_check_codex_prompt(tmux_session):
+        async def mock_check_idle_prompt(tmux_session):
             idx = min(call_count["n"], len(prompt_results) - 1)
             result = prompt_results[idx]
             call_count["n"] += 1
             return result
 
-        mq._check_codex_prompt = mock_check_codex_prompt
+        mq._check_idle_prompt = mock_check_idle_prompt
 
         # Run watch with very short timeout
         await mq._watch_for_idle("watch2", "codex123", "watcher456", timeout_seconds=0.1)
@@ -534,19 +536,20 @@ class TestCodexIdleDetection:
         codex_session.tmux_session = "tmux-codex"
         codex_session.friendly_name = "test-codex"
         codex_session.name = "codex-agent"
+        codex_session.status = SessionStatus.RUNNING
         mock_session_manager.get_session = MagicMock(return_value=codex_session)
 
         # Simulate: prompt, no-prompt, prompt, prompt → idle on 4th poll
         prompt_results = [True, False, True, True]
         call_count = {"n": 0}
 
-        async def mock_check_codex_prompt(tmux_session):
+        async def mock_check_idle_prompt(tmux_session):
             idx = min(call_count["n"], len(prompt_results) - 1)
             result = prompt_results[idx]
             call_count["n"] += 1
             return result
 
-        mq._check_codex_prompt = mock_check_codex_prompt
+        mq._check_idle_prompt = mock_check_idle_prompt
 
         await mq._watch_for_idle("watch3", "codex123", "watcher456", timeout_seconds=5)
 
@@ -555,8 +558,8 @@ class TestCodexIdleDetection:
         assert "is now idle" in pending[0].text
 
     @pytest.mark.asyncio
-    async def test_watch_claude_session_unaffected(self, mock_session_manager, temp_db_path):
-        """_watch_for_idle does not use Codex prompt detection for Claude sessions."""
+    async def test_watch_detects_claude_tmux_idle(self, mock_session_manager, temp_db_path):
+        """Phase 2: provider='claude', is_idle=False, tmux shows '>' — idle after 2 consecutive checks."""
         mq = MessageQueueManager(
             session_manager=mock_session_manager,
             db_path=temp_db_path,
@@ -564,32 +567,36 @@ class TestCodexIdleDetection:
             notifier=None,
         )
 
-        # Create a Claude session (default provider)
         claude_session = MagicMock()
         claude_session.id = "claude123"
         claude_session.provider = "claude"
         claude_session.tmux_session = "tmux-claude"
         claude_session.friendly_name = "test-claude"
         claude_session.name = "claude-agent"
+        claude_session.status = SessionStatus.RUNNING
         mock_session_manager.get_session = MagicMock(return_value=claude_session)
 
-        # _check_codex_prompt should never be called
-        mq._check_codex_prompt = AsyncMock(return_value=True)
+        # Simulate: prompt visible twice → idle detected
+        prompt_results = [True, True]
+        call_count = {"n": 0}
 
-        # Run watch with short timeout (Claude never goes idle via hook → timeout)
-        await mq._watch_for_idle("watch4", "claude123", "watcher456", timeout_seconds=0.1)
+        async def mock_check(tmux_session):
+            idx = min(call_count["n"], len(prompt_results) - 1)
+            result = prompt_results[idx]
+            call_count["n"] += 1
+            return result
 
-        # Should have timed out
+        mq._check_idle_prompt = mock_check
+
+        await mq._watch_for_idle("watch4", "claude123", "watcher456", timeout_seconds=5)
+
         pending = mq.get_pending_messages("watcher456")
         assert len(pending) == 1
-        assert "Timeout" in pending[0].text
-
-        # _check_codex_prompt should NOT have been called
-        mq._check_codex_prompt.assert_not_called()
+        assert "is now idle" in pending[0].text
 
     @pytest.mark.asyncio
-    async def test_watch_codex_pending_messages_suppress_idle(self, mock_session_manager, temp_db_path):
-        """Codex idle is suppressed when pending messages exist."""
+    async def test_watch_codex_phase4_not_at_prompt(self, mock_session_manager, temp_db_path):
+        """Phase 4: provider='codex', tmux idle + pending messages + tmux NOT showing '>' — not idle."""
         mq = MessageQueueManager(
             session_manager=mock_session_manager,
             db_path=temp_db_path,
@@ -603,26 +610,343 @@ class TestCodexIdleDetection:
         codex_session.tmux_session = "tmux-codex"
         codex_session.friendly_name = "test-codex"
         codex_session.name = "codex-agent"
+        codex_session.status = SessionStatus.RUNNING
         mock_session_manager.get_session = MagicMock(return_value=codex_session)
 
-        # Always show prompt
-        mq._check_codex_prompt = AsyncMock(return_value=True)
+        # Phase 2 shows prompt (so mem_idle becomes True), Phase 4 does NOT show prompt
+        call_count = {"n": 0}
 
-        # Insert a pending message directly into DB (bypass queue_message which
-        # triggers delivery for Codex sessions)
+        async def mock_check(tmux_session):
+            call_count["n"] += 1
+            # Phase 2 calls (odd calls in sequence): return True to reach mem_idle
+            # Phase 4 calls (even calls): return False — delivery in-flight
+            # Pattern: True, True, False, True, True, False, ...
+            # Phase 2 needs 2 consecutive → calls 1,2 → mem_idle=True
+            # Phase 4 → call 3 → False → not idle
+            # Next iteration: Phase 2 call 4 → True, but mem_idle already True from memory? No.
+            # Actually prompt_count resets each time mem_idle becomes True...
+            # Simpler: just return False always. Phase 2 never triggers, only mem_idle from
+            # delivery_states matters.
+            return False
+
+        mq._check_idle_prompt = mock_check
+
+        # Force is_idle=True in memory so Phase 4 check runs
+        from src.models import SessionDeliveryState
+        mq.delivery_states["codex123"] = SessionDeliveryState(session_id="codex123", is_idle=True)
+
+        # Insert a pending message directly into DB
         mq._execute("""
             INSERT INTO message_queue
             (id, target_session_id, text, delivery_mode, queued_at)
             VALUES (?, ?, ?, ?, ?)
         """, ("pending_msg", "codex123", "Pending task", "sequential", datetime.now().isoformat()))
 
-        # Run watch with short timeout — pending messages should suppress idle
+        # Run watch with short timeout
         await mq._watch_for_idle("watch5", "codex123", "watcher456", timeout_seconds=0.1)
 
-        # Should have timed out (not idle due to pending messages)
+        # Should have timed out (Phase 4 tiebreaker: not at prompt → not idle)
         pending_watcher = mq.get_pending_messages("watcher456")
         assert len(pending_watcher) == 1
         assert "Timeout" in pending_watcher[0].text
+
+
+class TestWatchForIdlePhases:
+    """Tests for 4-phase idle detection in _watch_for_idle (#180)."""
+
+    @pytest.mark.asyncio
+    async def test_watch_stuck_pending_tiebreaker(self, mock_session_manager, temp_db_path):
+        """Phase 4: is_idle=True, pending messages, tmux shows '>' twice — idle detected."""
+        mq = MessageQueueManager(
+            session_manager=mock_session_manager,
+            db_path=temp_db_path,
+            config={"timeouts": {"message_queue": {"watch_poll_interval_seconds": 0.01}}},
+            notifier=None,
+        )
+
+        session = MagicMock()
+        session.id = "target180"
+        session.provider = "claude"
+        session.tmux_session = "tmux-target"
+        session.friendly_name = "test-agent"
+        session.name = "claude-agent"
+        session.status = SessionStatus.RUNNING
+        mock_session_manager.get_session = MagicMock(return_value=session)
+
+        # Force is_idle=True in memory
+        mq.delivery_states["target180"] = SessionDeliveryState(session_id="target180", is_idle=True)
+
+        # Insert a stuck pending message
+        mq._execute("""
+            INSERT INTO message_queue
+            (id, target_session_id, text, delivery_mode, queued_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, ("stuck_msg", "target180", "Stuck message", "important", datetime.now().isoformat()))
+
+        # tmux always shows prompt (message delivery failed, msg stuck)
+        mq._check_idle_prompt = AsyncMock(return_value=True)
+
+        await mq._watch_for_idle("watch-p4", "target180", "watcher180", timeout_seconds=5)
+
+        pending = mq.get_pending_messages("watcher180")
+        assert len(pending) == 1
+        assert "is now idle" in pending[0].text
+
+    @pytest.mark.asyncio
+    async def test_watch_inflight_pending_not_idle(self, mock_session_manager, temp_db_path):
+        """Phase 4: is_idle=True, pending messages, tmux NOT showing '>' — not idle."""
+        mq = MessageQueueManager(
+            session_manager=mock_session_manager,
+            db_path=temp_db_path,
+            config={"timeouts": {"message_queue": {"watch_poll_interval_seconds": 0.01}}},
+            notifier=None,
+        )
+
+        session = MagicMock()
+        session.id = "target181"
+        session.provider = "claude"
+        session.tmux_session = "tmux-target"
+        session.friendly_name = "test-agent"
+        session.name = "claude-agent"
+        session.status = SessionStatus.RUNNING
+        mock_session_manager.get_session = MagicMock(return_value=session)
+
+        mq.delivery_states["target181"] = SessionDeliveryState(session_id="target181", is_idle=True)
+
+        mq._execute("""
+            INSERT INTO message_queue
+            (id, target_session_id, text, delivery_mode, queued_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, ("inflight_msg", "target181", "In-flight message", "important", datetime.now().isoformat()))
+
+        # tmux does NOT show prompt (delivery in-flight)
+        mq._check_idle_prompt = AsyncMock(return_value=False)
+
+        await mq._watch_for_idle("watch-inf", "target181", "watcher181", timeout_seconds=0.1)
+
+        pending = mq.get_pending_messages("watcher181")
+        assert len(pending) == 1
+        assert "Timeout" in pending[0].text
+
+    @pytest.mark.asyncio
+    async def test_watch_pending_tiebreaker_needs_two(self, mock_session_manager, temp_db_path):
+        """Phase 4: is_idle=True, pending messages, tmux shows '>' once then not — not idle."""
+        mq = MessageQueueManager(
+            session_manager=mock_session_manager,
+            db_path=temp_db_path,
+            config={"timeouts": {"message_queue": {"watch_poll_interval_seconds": 0.01}}},
+            notifier=None,
+        )
+
+        session = MagicMock()
+        session.id = "target182"
+        session.provider = "claude"
+        session.tmux_session = "tmux-target"
+        session.friendly_name = "test-agent"
+        session.name = "claude-agent"
+        session.status = SessionStatus.RUNNING
+        mock_session_manager.get_session = MagicMock(return_value=session)
+
+        mq.delivery_states["target182"] = SessionDeliveryState(session_id="target182", is_idle=True)
+
+        mq._execute("""
+            INSERT INTO message_queue
+            (id, target_session_id, text, delivery_mode, queued_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, ("flicker_msg", "target182", "Flickering message", "important", datetime.now().isoformat()))
+
+        # Phase 4 tiebreaker: prompt once, then gone → counter resets
+        prompt_results = [True, False, True, False, True, False]
+        call_count = {"n": 0}
+
+        async def mock_check(tmux_session):
+            idx = min(call_count["n"], len(prompt_results) - 1)
+            result = prompt_results[idx]
+            call_count["n"] += 1
+            return result
+
+        mq._check_idle_prompt = mock_check
+
+        await mq._watch_for_idle("watch-flick", "target182", "watcher182", timeout_seconds=0.1)
+
+        pending = mq.get_pending_messages("watcher182")
+        assert len(pending) == 1
+        assert "Timeout" in pending[0].text
+
+    @pytest.mark.asyncio
+    async def test_watch_session_status_fallback(self, mock_session_manager, temp_db_path):
+        """Phase 3: is_idle=False, tmux unavailable, session.status=IDLE, no pending — idle."""
+        mq = MessageQueueManager(
+            session_manager=mock_session_manager,
+            db_path=temp_db_path,
+            config={"timeouts": {"message_queue": {"watch_poll_interval_seconds": 0.01}}},
+            notifier=None,
+        )
+
+        session = MagicMock()
+        session.id = "target183"
+        session.provider = "claude"
+        session.tmux_session = None  # No tmux — Phase 2 skipped
+        session.friendly_name = "test-agent"
+        session.name = "claude-agent"
+        session.status = SessionStatus.IDLE
+        mock_session_manager.get_session = MagicMock(return_value=session)
+
+        # No pending messages, no in-memory idle
+        # Phase 3 should detect idle from session.status
+
+        await mq._watch_for_idle("watch-st", "target183", "watcher183", timeout_seconds=5)
+
+        pending = mq.get_pending_messages("watcher183")
+        assert len(pending) == 1
+        assert "is now idle" in pending[0].text
+
+    @pytest.mark.asyncio
+    async def test_watch_session_status_with_pending(self, mock_session_manager, temp_db_path):
+        """Phase 3+4: session.status=IDLE, pending messages, no tmux — not idle."""
+        mq = MessageQueueManager(
+            session_manager=mock_session_manager,
+            db_path=temp_db_path,
+            config={"timeouts": {"message_queue": {"watch_poll_interval_seconds": 0.01}}},
+            notifier=None,
+        )
+
+        session = MagicMock()
+        session.id = "target184"
+        session.provider = "claude"
+        session.tmux_session = None  # No tmux — can't verify via tiebreaker
+        session.friendly_name = "test-agent"
+        session.name = "claude-agent"
+        session.status = SessionStatus.IDLE
+        mock_session_manager.get_session = MagicMock(return_value=session)
+
+        # Insert pending message
+        mq._execute("""
+            INSERT INTO message_queue
+            (id, target_session_id, text, delivery_mode, queued_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, ("pending_st", "target184", "Pending", "sequential", datetime.now().isoformat()))
+
+        await mq._watch_for_idle("watch-stp", "target184", "watcher184", timeout_seconds=0.1)
+
+        pending = mq.get_pending_messages("watcher184")
+        assert len(pending) == 1
+        assert "Timeout" in pending[0].text
+
+    @pytest.mark.asyncio
+    async def test_153_regression_urgent_race(self, mock_session_manager, temp_db_path):
+        """#153 regression: urgent send → stale is_idle=True + pending → busy → not idle."""
+        mq = MessageQueueManager(
+            session_manager=mock_session_manager,
+            db_path=temp_db_path,
+            config={"timeouts": {"message_queue": {"watch_poll_interval_seconds": 0.01}}},
+            notifier=None,
+        )
+
+        session = MagicMock()
+        session.id = "target153"
+        session.provider = "claude"
+        session.tmux_session = "tmux-target"
+        session.friendly_name = "test-agent"
+        session.name = "claude-agent"
+        session.status = SessionStatus.RUNNING
+        mock_session_manager.get_session = MagicMock(return_value=session)
+
+        # Stale is_idle=True (from prior Stop hook, before urgent send)
+        mq.delivery_states["target153"] = SessionDeliveryState(session_id="target153", is_idle=True)
+
+        # Pending urgent message (just queued, delivery task scheduled)
+        mq._execute("""
+            INSERT INTO message_queue
+            (id, target_session_id, text, delivery_mode, queued_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, ("urgent_153", "target153", "Urgent task", "urgent", datetime.now().isoformat()))
+
+        # Claude is NOT at the prompt (about to receive the urgent message)
+        mq._check_idle_prompt = AsyncMock(return_value=False)
+
+        await mq._watch_for_idle("watch-153", "target153", "watcher153", timeout_seconds=0.1)
+
+        pending = mq.get_pending_messages("watcher153")
+        assert len(pending) == 1
+        assert "Timeout" in pending[0].text
+
+    @pytest.mark.asyncio
+    async def test_watch_session_gone_mid_loop(self, mock_session_manager, temp_db_path):
+        """Guard: get_session() returns None mid-loop — watch exits cleanly."""
+        mq = MessageQueueManager(
+            session_manager=mock_session_manager,
+            db_path=temp_db_path,
+            config={"timeouts": {"message_queue": {"watch_poll_interval_seconds": 0.01}}},
+            notifier=None,
+        )
+
+        # Session exists on first call, gone on second
+        call_count = {"n": 0}
+        session = MagicMock()
+        session.id = "target_gone"
+        session.provider = "claude"
+        session.tmux_session = "tmux-gone"
+        session.friendly_name = "gone-agent"
+        session.name = "claude-gone"
+        session.status = SessionStatus.RUNNING
+
+        def get_session_side_effect(sid):
+            if sid == "target_gone":
+                call_count["n"] += 1
+                if call_count["n"] > 1:
+                    return None
+                return session
+            return None
+
+        mock_session_manager.get_session = MagicMock(side_effect=get_session_side_effect)
+
+        # Not idle per memory, tmux not showing prompt
+        mq._check_idle_prompt = AsyncMock(return_value=False)
+
+        await mq._watch_for_idle("watch-gone", "target_gone", "watcher_gone", timeout_seconds=5)
+
+        # Should have exited to timeout path (session gone → break → timeout notification)
+        pending = mq.get_pending_messages("watcher_gone")
+        assert len(pending) == 1
+        assert "Timeout" in pending[0].text or "still active" in pending[0].text
+
+    @pytest.mark.asyncio
+    async def test_counters_reset_between_iterations(self, mock_session_manager, temp_db_path):
+        """prompt_count and pending_idle_count reset properly between iterations."""
+        mq = MessageQueueManager(
+            session_manager=mock_session_manager,
+            db_path=temp_db_path,
+            config={"timeouts": {"message_queue": {"watch_poll_interval_seconds": 0.01}}},
+            notifier=None,
+        )
+
+        session = MagicMock()
+        session.id = "target_ctr"
+        session.provider = "claude"
+        session.tmux_session = "tmux-ctr"
+        session.friendly_name = "counter-agent"
+        session.name = "claude-ctr"
+        session.status = SessionStatus.RUNNING
+        mock_session_manager.get_session = MagicMock(return_value=session)
+
+        # Pattern: prompt True, prompt False (resets), prompt True, prompt True → idle
+        prompt_results = [True, False, True, True]
+        call_count = {"n": 0}
+
+        async def mock_check(tmux_session):
+            idx = min(call_count["n"], len(prompt_results) - 1)
+            result = prompt_results[idx]
+            call_count["n"] += 1
+            return result
+
+        mq._check_idle_prompt = mock_check
+
+        await mq._watch_for_idle("watch-ctr", "target_ctr", "watcher_ctr", timeout_seconds=5)
+
+        pending = mq.get_pending_messages("watcher_ctr")
+        assert len(pending) == 1
+        assert "is now idle" in pending[0].text
 
 
 class TestTelegramMirroring:
