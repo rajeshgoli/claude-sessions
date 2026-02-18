@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, List, Callable, Awaitable
 
-from .models import QueuedMessage, SessionDeliveryState
+from .models import QueuedMessage, SessionDeliveryState, SessionStatus
 
 logger = logging.getLogger(__name__)
 
@@ -1155,8 +1155,8 @@ class MessageQueueManager:
             await asyncio.sleep(poll_interval)
         return False
 
-    async def _check_codex_prompt(self, tmux_session: str) -> bool:
-        """Check if Codex CLI is showing the input prompt (idle)."""
+    async def _check_idle_prompt(self, tmux_session: str) -> bool:
+        """Check if CLI is showing the input prompt (idle). Works for both Claude Code and Codex CLI."""
         try:
             proc = await asyncio.create_subprocess_exec(
                 "tmux", "capture-pane", "-p", "-t", tmux_session,
@@ -1187,29 +1187,76 @@ class MessageQueueManager:
             start_time = datetime.now()
             poll_interval = self.watch_poll_interval
             elapsed = 0
-            codex_prompt_count = 0
+            prompt_count = 0          # Phase 2: consecutive tmux prompt detections
+            pending_idle_count = 0    # Phase 4: consecutive prompt detections with stuck pending msgs
 
             while elapsed < timeout_seconds:
-                # Check if target is idle
+                # Cache session object for this iteration
+                session = self.session_manager.get_session(target_session_id)
+
+                # Guard: session disappeared mid-loop (killed/cleaned up)
+                if not session:
+                    logger.warning(f"Watch {watch_id}: session {target_session_id} no longer exists")
+                    notification = (
+                        f"[sm wait] {target_session_id} no longer exists (waited {int(elapsed)}s)"
+                    )
+                    self.queue_message(
+                        target_session_id=watcher_session_id,
+                        text=notification,
+                        delivery_mode="important",
+                    )
+                    return
+
+                # Phase 1: Check in-memory idle state
                 state = self.delivery_states.get(target_session_id)
-                is_idle = state.is_idle if state else False
+                mem_idle = state.is_idle if state else False
 
-                # Codex CLI fallback: detect idle via tmux prompt
-                # Requires two consecutive detections to avoid transient prompts
-                if not is_idle:
-                    session = self.session_manager.get_session(target_session_id)
-                    if session and getattr(session, "provider", "claude") == "codex" and session.tmux_session:
-                        prompt_visible = await self._check_codex_prompt(session.tmux_session)
-                        if prompt_visible:
-                            codex_prompt_count += 1
-                            if codex_prompt_count >= 2:
-                                is_idle = True
-                        else:
-                            codex_prompt_count = 0
+                # Phase 2: If NOT idle per memory, try tmux prompt fallback
+                # Handles RCA #1 (hook failure). Extends existing Codex fallback to Claude.
+                if not mem_idle:
+                    if session.tmux_session:
+                        provider = getattr(session, "provider", "claude")
+                        if provider in ("codex", "claude"):
+                            prompt_visible = await self._check_idle_prompt(
+                                session.tmux_session
+                            )
+                            if prompt_visible:
+                                prompt_count += 1
+                                if prompt_count >= 2:
+                                    mem_idle = True
+                            else:
+                                prompt_count = 0
+                    # Reset pending_idle_count when not idle per memory/tmux
+                    if not mem_idle:
+                        pending_idle_count = 0
 
-                # Validate: idle with pending messages means delivery is in-flight
+                # Phase 3: Session.status fallback (weak — only catches in-memory corruption)
+                if not mem_idle:
+                    if session.status == SessionStatus.IDLE:
+                        mem_idle = True
+
+                # Phase 4: Pending-message validation with tmux tiebreaker
+                # ALL idle sources go through this — no skip flags.
+                is_idle = mem_idle
                 if is_idle and self.get_pending_messages(target_session_id):
-                    is_idle = False
+                    # Pending messages exist. Use tmux prompt as tiebreaker to
+                    # distinguish stuck (delivery failed) from in-flight.
+                    # Handles RCA #2 (is_idle=True + stuck pending messages).
+                    if session.tmux_session:
+                        prompt_visible = await self._check_idle_prompt(
+                            session.tmux_session
+                        )
+                        if prompt_visible:
+                            pending_idle_count += 1
+                            if pending_idle_count >= 2:
+                                pass       # 2 consecutive: truly idle, msgs stuck
+                            else:
+                                is_idle = False  # Need 2 consecutive to confirm
+                        else:
+                            pending_idle_count = 0
+                            is_idle = False      # Not at prompt, delivery in-flight
+                    else:
+                        is_idle = False          # Can't verify, assume in-flight
 
                 if is_idle:
                     # Target is idle - notify watcher
