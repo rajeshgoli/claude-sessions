@@ -354,36 +354,19 @@ class TmuxController:
             return False
 
         try:
-            import shlex
-            escaped_text = shlex.quote(text)
-
-            # Send the text first
+            # Send text + Enter atomically in a single tmux send-keys call (#175)
+            payload = text + "\r"
             proc = await asyncio.create_subprocess_exec(
-                'tmux', 'send-keys', '-t', session_name, '--', text,
+                'tmux', 'send-keys', '-t', session_name, '--', payload,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await asyncio.wait_for(proc.wait(), timeout=self.send_keys_timeout_seconds)
-
-            if proc.returncode != 0:
-                stderr = await proc.stderr.read()
-                logger.error(f"Failed to send text: {stderr.decode()}")
-                return False
-
-            # Brief delay to avoid paste detection (non-blocking)
-            await asyncio.sleep(self.send_keys_settle_seconds)
-
-            # Send Enter
-            proc = await asyncio.create_subprocess_exec(
-                'tmux', 'send-keys', '-t', session_name, 'Enter',
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=self.send_keys_timeout_seconds
             )
-            await asyncio.wait_for(proc.wait(), timeout=self.send_keys_timeout_seconds)
 
             if proc.returncode != 0:
-                stderr = await proc.stderr.read()
-                logger.error(f"Failed to send Enter: {stderr.decode()}")
+                logger.error(f"Failed to send input: {stderr.decode()}")
                 return False
 
             logger.info(f"Sent input (async) to {session_name}: {text[:50]}...")

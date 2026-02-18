@@ -1584,6 +1584,38 @@ def cmd_review(
         return 0
 
 
+def _wait_for_claude_prompt(
+    tmux_session: str, timeout: float = 3.0, poll_interval: float = 0.1
+) -> bool:
+    """Poll capture-pane until Claude Code shows bare '>' prompt, or timeout.
+
+    Blocking version for synchronous callers (e.g. cmd_clear).
+    Returns True if prompt detected, False if timed out (caller proceeds anyway).
+    """
+    import subprocess
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            result = subprocess.run(
+                ["tmux", "capture-pane", "-p", "-t", tmux_session],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                output = result.stdout.rstrip('\n')
+                if output:
+                    last_line = output.split('\n')[-1]
+                    if last_line.rstrip() == '>':
+                        return True
+        except Exception:
+            pass
+        time.sleep(poll_interval)
+    return False
+
+
 def cmd_clear(
     client: SessionManagerClient,
     requester_session_id: Optional[str],
@@ -1679,8 +1711,8 @@ def cmd_clear(
                 capture_output=True,
                 text=True,
             )
-            # Wait for Claude to wake up
-            time.sleep(1.5)
+            # Wait for Claude to show prompt after wake-up (#175)
+            _wait_for_claude_prompt(tmux_session)
 
         # First, send ESC to interrupt any ongoing stream
         subprocess.run(
@@ -1690,26 +1722,19 @@ def cmd_clear(
             text=True,
         )
 
-        # Wait for interrupt to process
-        time.sleep(0.5)
+        # Wait for Claude to show idle prompt before sending payload (#175)
+        _wait_for_claude_prompt(tmux_session)
 
-        # Now send clear command using the same approach as send_input
+        # Send clear command + Enter atomically (#175 Bug B)
         subprocess.run(
-            ["tmux", "send-keys", "-t", tmux_session, clear_command],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        time.sleep(1)
-        subprocess.run(
-            ["tmux", "send-keys", "-t", tmux_session, "Enter"],
+            ["tmux", "send-keys", "-t", tmux_session, "--", clear_command + "\r"],
             check=True,
             capture_output=True,
             text=True,
         )
 
-        # Wait for clear to process
-        time.sleep(2)
+        # Wait for clear to finish and prompt to reappear (#175)
+        _wait_for_claude_prompt(tmux_session, timeout=5.0)
 
         # Invalidate server-side caches so stale stop-hook notification
         # state from the previous task doesn't leak into the next task (#167)
@@ -1718,14 +1743,7 @@ def cmd_clear(
         # Send new prompt if provided
         if new_prompt:
             subprocess.run(
-                ["tmux", "send-keys", "-t", tmux_session, new_prompt],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            time.sleep(1)
-            subprocess.run(
-                ["tmux", "send-keys", "-t", tmux_session, "Enter"],
+                ["tmux", "send-keys", "-t", tmux_session, "--", new_prompt + "\r"],
                 check=True,
                 capture_output=True,
                 text=True,

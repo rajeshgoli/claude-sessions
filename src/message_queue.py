@@ -834,8 +834,8 @@ class MessageQueueManager:
             )
             await asyncio.wait_for(proc.communicate(), timeout=self.subprocess_timeout)
 
-            # Brief delay for interrupt to process
-            await asyncio.sleep(self.urgent_delay_ms / 1000)
+            # Wait for Claude to show idle prompt before sending payload (#175)
+            await self._wait_for_claude_prompt_async(session.tmux_session)
 
             # Inject message directly (use async version to avoid blocking)
             success = await self.session_manager._deliver_direct(session, msg.text)
@@ -1098,6 +1098,37 @@ class MessageQueueManager:
 
         logger.info(f"Watching {target_session_id} for {timeout_seconds}s, will notify {watcher_session_id}")
         return watch_id
+
+    async def _wait_for_claude_prompt_async(
+        self, tmux_session: str, timeout: float = 3.0, poll_interval: float = 0.1
+    ) -> bool:
+        """Poll capture-pane until Claude Code shows bare '>' prompt, or timeout.
+
+        Uses asyncio.create_subprocess_exec (non-blocking) to avoid violating
+        the no-blocking-IO-in-async constraint (issue #37).
+        Returns True if prompt detected, False if timed out (caller proceeds anyway).
+        """
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "tmux", "capture-pane", "-p", "-t", tmux_session,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await asyncio.wait_for(
+                    proc.communicate(), timeout=self.subprocess_timeout
+                )
+                if proc.returncode == 0:
+                    output = stdout.decode().rstrip('\n')
+                    if output:
+                        last_line = output.split('\n')[-1]
+                        if last_line.rstrip() == '>':
+                            return True
+            except Exception:
+                pass
+            await asyncio.sleep(poll_interval)
+        return False
 
     async def _check_codex_prompt(self, tmux_session: str) -> bool:
         """Check if Codex CLI is showing the input prompt (idle)."""

@@ -25,8 +25,9 @@ def mock_client():
 
 @pytest.fixture
 def mock_subprocess_run():
-    """Mock subprocess.run to avoid actually sending tmux commands."""
-    with patch('subprocess.run') as mock_run:
+    """Mock subprocess.run and _wait_for_claude_prompt to avoid tmux and polling."""
+    with patch('subprocess.run') as mock_run, \
+         patch('src.cli.commands._wait_for_claude_prompt', return_value=True):
         # Default: successful tmux commands
         mock_run.return_value = Mock(
             returncode=0,
@@ -71,11 +72,8 @@ def test_clear_completed_session_wakes_up_first(mock_client, mock_subprocess_run
     # Second call should be Escape (to interrupt)
     assert calls[1][0][0] == ["tmux", "send-keys", "-t", "claude-test-123", "Escape"]
 
-    # Third call should be /clear
-    assert calls[2][0][0] == ["tmux", "send-keys", "-t", "claude-test-123", "/clear"]
-
-    # Fourth call should be Enter (to execute /clear)
-    assert calls[3][0][0] == ["tmux", "send-keys", "-t", "claude-test-123", "Enter"]
+    # Third call should be /clear+Enter atomic (#175)
+    assert calls[2][0][0] == ["tmux", "send-keys", "-t", "claude-test-123", "--", "/clear\r"]
 
 
 def test_clear_running_session_no_wake_up(mock_client, mock_subprocess_run):
@@ -110,8 +108,8 @@ def test_clear_running_session_no_wake_up(mock_client, mock_subprocess_run):
     # First call should be Escape (NOT Enter)
     assert calls[0][0][0] == ["tmux", "send-keys", "-t", "claude-test-456", "Escape"]
 
-    # Second call should be /clear
-    assert calls[1][0][0] == ["tmux", "send-keys", "-t", "claude-test-456", "/clear"]
+    # Second call should be /clear+Enter atomic (#175)
+    assert calls[1][0][0] == ["tmux", "send-keys", "-t", "claude-test-456", "--", "/clear\r"]
 
 
 def test_clear_error_session_no_wake_up(mock_client, mock_subprocess_run):
@@ -175,21 +173,17 @@ def test_clear_with_new_prompt_after_completed(mock_client, mock_subprocess_run)
     # Verify sequence includes wake-up, clear, and new prompt
     calls = mock_subprocess_run.call_args_list
 
-    # Should have: Enter (wake), Escape, /clear, Enter, new_prompt, Enter
-    assert len(calls) >= 6
+    # Should have: Enter (wake), Escape, /clear\r (atomic), new_prompt\r (atomic)
+    assert len(calls) >= 4
 
     # First: wake up
     assert calls[0][0][0][4] == "Enter"
     # Then Escape
     assert calls[1][0][0][4] == "Escape"
-    # Then /clear
-    assert calls[2][0][0][4] == "/clear"
-    # Then Enter
-    assert calls[3][0][0][4] == "Enter"
-    # Then new prompt
-    assert calls[4][0][0][4] == "Start working on new task"
-    # Then Enter
-    assert calls[5][0][0][4] == "Enter"
+    # Then /clear+Enter atomic (#175)
+    assert calls[2][0][0] == ["tmux", "send-keys", "-t", "claude-test-prompt", "--", "/clear\r"]
+    # Then new prompt+Enter atomic (#175)
+    assert calls[3][0][0] == ["tmux", "send-keys", "-t", "claude-test-prompt", "--", "Start working on new task\r"]
 
 
 def test_clear_not_authorized(mock_client, mock_subprocess_run):
