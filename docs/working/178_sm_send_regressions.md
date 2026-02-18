@@ -60,7 +60,36 @@ The new atomic approach fails because:
 
 **Empirical verification of the byte-level behavior:**
 
-I verified that `tmux send-keys -- "text\r"` (with Python's actual 0x0D byte) correctly delivers 0x0D to the target process's stdin — the same byte that `tmux send-keys Enter` delivers. I also verified that tmux does NOT send bracketed paste markers for `send-keys` (with or without `-l`), even when the target pane has enabled bracketed paste mode. The issue is therefore not about the byte value but about the **timing**: `\r` arriving as part of a rapid character burst vs. arriving after a pause.
+Byte-timing test: a Python script (`tests/regression/byte_timing_probe.py`) was run in a tmux pane in raw tty mode, recording each incoming byte with a timestamp. Two approaches were tested:
+
+```
+Atomic text+\r (current broken path — single send-keys call):
+  t+  0.0ms  0x68  'h'
+  t+  0.1ms  0x65  'e'
+  t+  0.0ms  0x6c  'l'
+  t+  0.0ms  0x6c  'l'
+  t+  0.0ms  0x6f  'o'
+  t+  0.0ms  0x0d  \r   ← 0.0ms after last char — same burst
+
+Two-call + 0.3s settle (proposed fix):
+  t+  0.0ms  0x77  'w'
+  t+  0.0ms  0x6f  'o'
+  t+  0.0ms  0x72  'r'
+  t+  0.0ms  0x6c  'l'
+  t+  0.0ms  0x64  'd'
+  t+389.7ms  0x0d  \r   ← 389.7ms after last char — distinct, isolated event
+```
+
+The atomic path delivers `\r` as part of a sub-millisecond burst alongside the text characters. The two-call path delivers `\r` as a separate event after the settle delay. Claude Code's input handler (Node.js TUI in raw mode) processes a rapid character burst as pasted text, in which `\r` is treated as a literal byte rather than a submit command. The settle delay creates the gap needed for paste mode to end before Enter arrives.
+
+I also verified that tmux does NOT send bracketed paste markers for `send-keys` (with or without `-l`), even when the target pane has enabled bracketed paste mode. The issue is therefore not about the byte value but about the **timing**: `\r` arriving as part of a rapid character burst vs. arriving after a pause.
+
+**Live end-to-end confirmation (both paths, same session):**
+
+- **Atomic `text + \r` (broken):** `sm send` delivered a message to a live Claude Code session. Text appeared in the input buffer but the session did not process it — a human had to press Enter manually.
+- **Two-call + 0.3s settle (proposed fix):** `tmux send-keys -- "text"` followed by `sleep 0.3` and `tmux send-keys Enter` was sent to the same live Claude Code session. The message was received and automatically submitted — no manual intervention required.
+
+Both paths tested against the same Claude Code session. The fix is empirically validated end-to-end.
 
 **Scope of impact:**
 
@@ -70,7 +99,7 @@ ALL delivery paths for tmux-based sessions go through `send_input_async`:
 - Urgent delivery: `_deliver_urgent` → `_deliver_direct` → `send_input_async`
 - `cmd_clear`: uses atomic `subprocess.run(["tmux", "send-keys", ..., clear_command + "\r"])` — same pattern
 
-The sync `send_input` was NOT changed by PR #176 and still uses the two-call approach with settle delay, but it's only used for spawning sessions (not for message delivery).
+The sync `TmuxController.send_input` was NOT changed by PR #176 and still uses the two-call approach with settle delay. It is not used in production delivery paths — all production delivery uses `send_input_async`. The sync version appears only in a self-test helper within `tmux_controller.py` itself.
 
 ### Regression 2 — 3-second prompt polling creates Stop hook race window
 
@@ -169,7 +198,7 @@ async def send_input_async(self, session_name: str, text: str) -> bool:
     except ...
 ```
 
-Also revert the same pattern in `cmd_clear` (back to two separate send-keys calls with a settle delay).
+Also revert the same pattern in `cmd_clear` (back to two separate send-keys calls with a settle delay). The `#174` invariants (`invalidate_cache` fence before tmux operations, skip-count race protections) are in the surrounding code and are unaffected — only the send-keys call pattern reverts.
 
 **Why this doesn't reintroduce #175 Bug B:** The original Bug B ("missing Enter") was caused by the Enter subprocess failing silently (timeout or tmux session killed between the two calls). The 0.3s settle delay itself was not the cause — it was the lack of error handling on the second call. The proposed fix keeps `proc.communicate()` and checks `returncode` for both calls, making failures observable. The 0.3s settle is the minimum time needed for Claude Code to exit paste mode.
 
@@ -193,19 +222,9 @@ This ensures that if a Stop hook fires during prompt polling and triggers `_try_
 
 **Consideration:** The lock is held during the 3-second prompt polling window. This means sequential messages can't be delivered during this time. This is the correct behavior — urgent messages should preempt sequential ones, not race with them.
 
-### Fix 3 — Mark session active before Escape in urgent delivery
+### Note on `is_idle` state in urgent delivery
 
-To further prevent the race, mark the session as active (`is_idle = False`) before sending Escape:
-
-```python
-async def _deliver_urgent(self, session_id: str, msg: QueuedMessage):
-    # ... existing checks ...
-    state = self._get_or_create_state(session_id)
-    state.is_idle = False  # Prevent _try_deliver_messages from delivering during our window
-    # ... Escape, poll, deliver ...
-```
-
-This prevents `_try_deliver_messages` from even attempting delivery (it checks `state.is_idle` and returns early if False). Combined with Fix 2, this provides defense-in-depth.
+`mark_session_active()` is already called at `message_queue.py:432` before `_deliver_urgent` is scheduled, so `is_idle` is `False` before `_deliver_urgent` begins executing. No additional write is needed. The delivery lock (Fix 2) is the substantive guard against the race.
 
 ---
 
@@ -215,7 +234,7 @@ This prevents `_try_deliver_messages` from even attempting delivery (it checks `
 
 1. **Unit test:** Verify `send_input_async` makes TWO subprocess calls (text, then Enter) with the settle delay in between — not a single call with `\r`
 2. **Unit test:** Verify `send_input_async` returns False and logs error when EITHER the text call or the Enter call fails
-3. **Unit test:** Verify the settle delay is at least `send_keys_settle_seconds` (0.3s)
+3. **Unit test:** Mock `asyncio.sleep` and verify it is called with `send_keys_settle_seconds` as the argument, positioned between the text send-keys call and the Enter send-keys call (not a wall-clock timing assertion)
 4. **Integration test:** Send a multi-line payload (simulating `[Input from: ...]\nActual message`) via `send_input_async` to a real tmux session running a test program. Verify the text AND Enter are received (the `\r` byte appears after the settle delay)
 5. **Verify `cmd_clear` also uses two-call approach** with settle delay (not atomic `\r`)
 
@@ -223,8 +242,8 @@ This prevents `_try_deliver_messages` from even attempting delivery (it checks `
 
 1. **Unit test:** Verify `_deliver_urgent` acquires the per-session delivery lock
 2. **Unit test:** Simulate concurrent `_deliver_urgent` and `_try_deliver_messages` for the same session — verify only one runs at a time (lock mutual exclusion)
-3. **Unit test:** Verify `state.is_idle` is set to False before Escape is sent in `_deliver_urgent`
-4. **Integration test:** Send an urgent message to a session that also has a sequential message queued. Verify the urgent message is delivered first (not the sequential one)
+3. **Integration test:** Send an urgent message to a session that also has a sequential message queued. Verify the urgent message is delivered first (not the sequential one)
+4. **Regression compatibility:** Run `tests/regression/test_issue_153_*.py` and `tests/regression/test_issue_154_*.py` in full after the delivery lock and idle-state changes. The lock introduction must not break existing state-transition behavior covered by those tests.
 
 ---
 
@@ -233,7 +252,7 @@ This prevents `_try_deliver_messages` from even attempting delivery (it checks `
 | File | Change |
 |------|--------|
 | `src/tmux_controller.py` | Revert `send_input_async` to two-call approach with settle delay, keep `proc.communicate()` improvement |
-| `src/message_queue.py` | Add delivery lock and `is_idle=False` to `_deliver_urgent` |
+| `src/message_queue.py` | Add delivery lock to `_deliver_urgent` (no `is_idle` write — already set by `mark_session_active` at line 432) |
 | `src/cli/commands.py` | Revert `cmd_clear` atomic send-keys back to two-call approach with `_wait_for_claude_prompt` delay |
 | `tests/regression/test_issue_175_send_truncation.py` | Update Bug B tests to verify two-call approach instead of atomic |
 | `tests/regression/test_issue_178_sm_send_regressions.py` | New test file for both regressions |
