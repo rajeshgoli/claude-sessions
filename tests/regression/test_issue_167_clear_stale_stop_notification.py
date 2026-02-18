@@ -145,8 +145,9 @@ def mock_client():
 
 @pytest.fixture
 def mock_subprocess_run():
-    """Mock subprocess.run to avoid actually sending tmux commands."""
-    with patch("subprocess.run") as mock_run:
+    """Mock subprocess.run and _wait_for_claude_prompt to avoid tmux and polling."""
+    with patch("subprocess.run") as mock_run, \
+         patch("src.cli.commands._wait_for_claude_prompt", return_value=True):
         mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
         yield mock_run
 
@@ -203,10 +204,10 @@ def test_cmd_clear_invalidates_before_new_prompt(mock_client, mock_subprocess_ru
     # Verify invalidate_cache was called — tmux calls for the new prompt
     # should follow after the cache invalidation
     tmux_calls = mock_subprocess_run.call_args_list
-    # Escape, /clear, Enter are the tmux ops before invalidation
-    # Then new prompt, Enter are after
+    # Escape, /clear\r (atomic) are the tmux ops before invalidation
+    # Then new_prompt\r (atomic) is after (#175)
     assert any(
-        call[0][0][4] == "Start new task" for call in tmux_calls
+        "Start new task" in str(call) for call in tmux_calls
     ), "New prompt should have been sent via tmux"
 
 
