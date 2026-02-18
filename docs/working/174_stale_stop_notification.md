@@ -38,7 +38,7 @@ When `sm send ... --urgent` (or any mode with `notify_on_stop=True`) delivers a 
 5. `_send_stop_notification()` reads `session_manager.hook_output_store.get(session_id)` to get the last output
 6. The notification is sent with that output
 
-`hook_output_store` is `app.state.last_claude_output` — a shared dict populated by the Stop hook handler each time a Stop hook fires.
+`hook_output_store` is `app.state.last_claude_output` — a shared dict populated by the hook handler **whenever `last_message` is present**, before Stop/Notification event-specific branching (`src/server.py:1350-1358`, before the `hook_event == "Stop"` branch at line 1362).
 
 ### How `sm clear` resets state (the #167 fix)
 
@@ -48,6 +48,14 @@ When `sm send ... --urgent` (or any mode with `notify_on_stop=True`) delivers a 
 - `state.stop_notify_sender_id` — clears any pending notification recipient
 
 `cmd_clear` calls `client.invalidate_cache(session_id)` **after a 2-second sleep** following the tmux `/clear` command.
+
+### The gating bug: hook-agnostic consumption of `stop_notify_sender_id`
+
+The root cause is **not** primarily cache staleness — it is that `mark_session_idle()` is completely hook-agnostic. Any Stop hook that fires while `stop_notify_sender_id` is set will unconditionally consume it and send a notification (lines 275-283 of `src/message_queue.py`). There is no correlation between when `notify_on_stop` is armed (by `sm send --urgent`) and which Stop hook invocation is entitled to consume it.
+
+Cache staleness is a secondary symptom: it determines what message content X appears in the notification, but the fundamental failure is that the wrong Stop hook event (from `/clear`) fires the notification at all. Even if the cache were bypassed entirely, the `/clear` Stop hook would still steal `stop_notify_sender_id` and prevent task B's notification from firing.
+
+The fix must establish correlation — a mechanism that allows the arm event (`sm send --urgent` / `invalidate_cache()`) to specify which Stop hook is the intended consumer.
 
 ### The race condition (why #167 fix is incomplete)
 
@@ -277,10 +285,19 @@ Move `invalidate_cache()` to BEFORE the tmux operations, so skip_count is armed 
 # NEW: invalidate before sending /clear, so skip_count is set before the Stop hook fires
 success, unavailable = client.invalidate_cache(target_session_id)
 if not success:
-    logger.warning(
-        f"Cache invalidation failed for {target_session_id}; "
-        f"stale output may affect next notification"
-    )
+    if unavailable:
+        # Server is unreachable — skip fence is NOT armed. The /clear Stop hook may
+        # steal stop_notify_sender_id if it arrives after a future sm send --urgent.
+        logger.error(
+            f"Cache invalidation SKIPPED for {target_session_id}: server unavailable. "
+            f"Skip fence not armed — stale stop notification possible if server recovers."
+        )
+    else:
+        # Server responded but the operation failed (e.g., session not found).
+        logger.warning(
+            f"Cache invalidation failed for {target_session_id}; "
+            f"stale output may affect next notification"
+        )
 
 # Send ESC + /clear + Enter to Claude (existing tmux operations follow here)
 ...
@@ -337,10 +354,11 @@ This is acceptable: the deferred case is already a degraded path (transcript not
 
 ## Ticket Classification
 
-**Single ticket.** The fix touches 4 files with targeted, well-understood changes:
+**Single ticket.** The fix touches 5 files with targeted, well-understood changes:
 - `src/models.py`: add `stop_notify_skip_count: int = 0` to `SessionDeliveryState`
 - `src/message_queue.py`: add `last_output` param to `mark_session_idle()` and `_send_stop_notification()`; add skip_count decrement logic
 - `src/server.py`: increment `stop_notify_skip_count` in `_invalidate_session_cache()`; pass `last_message` to `mark_session_idle()`
-- `src/cli/commands.py`: move `invalidate_cache()` call before tmux operations; check return value
+- `src/cli/commands.py`: move `invalidate_cache()` call before tmux operations; distinguish unavailable vs. failed in return-value check
+- `tests/regression/test_issue_174_skip_count_race.py` (new): regression test for the late `/clear` Stop hook race scenario
 
 One agent can complete this without context compaction.
