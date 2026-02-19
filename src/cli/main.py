@@ -257,6 +257,32 @@ def main():
         help="Number of lines to capture (default: 30)"
     )
 
+    # sm tail <session> [-n N] [--raw] [--db-path PATH]
+    tail_parser = subparsers.add_parser(
+        "tail",
+        help="Show recent agent activity (structured tool log or raw tmux output)"
+    )
+    tail_parser.add_argument(
+        "session",
+        help="Session ID or friendly name"
+    )
+    tail_parser.add_argument(
+        "-n",
+        type=int,
+        default=10,
+        help="Number of entries (structured) or lines (raw) to show (default: 10)"
+    )
+    tail_parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Show raw tmux pane output with ANSI stripped"
+    )
+    tail_parser.add_argument(
+        "--db-path",
+        default=None,
+        help="Override tool_usage.db path (default: ~/.local/share/claude-sessions/tool_usage.db)"
+    )
+
     # sm clear <session> [prompt]
     parser_clear = subparsers.add_parser(
         "clear",
@@ -317,7 +343,7 @@ def main():
     no_session_needed = [
         "lock", "unlock", "subagent-start", "subagent-stop", "all", "send", "wait", "what",
         "subagents", "children", "kill", "new", "claude", "codex", "codex-app", "codex-server",
-        "attach", "output", "clear", "review", "context-monitor", "remind", None
+        "attach", "output", "tail", "clear", "review", "context-monitor", "remind", None
     ]
     # Commands that require session_id: spawn (needs to set parent_session_id)
     requires_session_id = ["spawn"]
@@ -427,6 +453,11 @@ def main():
         sys.exit(commands.cmd_attach(client, args.session))
     elif args.command == "output":
         sys.exit(commands.cmd_output(client, args.session, args.lines))
+    elif args.command == "tail":
+        sys.exit(commands.cmd_tail(
+            client, args.session, args.n, args.raw,
+            db_path_override=getattr(args, 'db_path', None),
+        ))
     elif args.command == "clear":
         sys.exit(commands.cmd_clear(client, session_id, args.session, args.prompt))
     elif args.command == "handoff":

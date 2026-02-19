@@ -2,9 +2,13 @@
 
 import os
 import re
+import sqlite3
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
+
+_BASH_DISPLAY_WIDTH = 80
 
 from .client import SessionManagerClient
 from .formatting import format_session_line, format_relative_time, format_status_list
@@ -1486,6 +1490,139 @@ def cmd_output(client: SessionManagerClient, identifier: str, lines: int) -> int
 
     # Print output
     print(output, end="")
+    return 0
+
+
+def cmd_tail(
+    client: SessionManagerClient,
+    identifier: str,
+    n: int = 10,
+    raw: bool = False,
+    db_path_override: Optional[str] = None,
+) -> int:
+    """
+    Show recent activity for a session.
+
+    Structured mode (default): last N PreToolUse events from tool_usage.db.
+    Raw mode (--raw): last N lines of tmux pane output with ANSI stripped.
+
+    Exit codes:
+        0: Success
+        1: Session not found, DB not found, or capture error
+        2: Session manager unavailable
+    """
+    # Validate -n
+    if n < 1:
+        print("Error: -n must be at least 1", file=sys.stderr)
+        return 1
+
+    # Resolve identifier to session ID
+    session_id, session = resolve_session_id(client, identifier)
+    if session_id is None:
+        sessions = client.list_sessions()
+        if sessions is None:
+            print("Error: Session manager unavailable", file=sys.stderr)
+            return 2
+        else:
+            print(f"Error: Session '{identifier}' not found", file=sys.stderr)
+            return 1
+
+    name = session.get("friendly_name") or session.get("name") or session_id
+    provider = session.get("provider", "claude")
+
+    # --- Raw mode ---
+    if raw:
+        if provider == "codex-app":
+            message = client.get_last_message(session_id)
+            if not message:
+                print("No output available for this Codex app session", file=sys.stderr)
+                return 1
+            print(message)
+            return 0
+
+        tmux_session = session.get("tmux_session")
+        if not tmux_session:
+            print("Error: Session has no tmux session", file=sys.stderr)
+            return 1
+
+        from ..tmux_controller import TmuxController
+        tmux = TmuxController()
+        output = tmux.capture_pane(tmux_session, lines=n)
+        if output is None:
+            print(f"Error: Failed to capture output from {tmux_session}", file=sys.stderr)
+            return 1
+
+        # Strip ANSI escape codes
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        clean = ansi_escape.sub('', output)
+        print(clean, end="")
+        return 0
+
+    # --- Structured mode: query tool_usage.db ---
+    default_db = "~/.local/share/claude-sessions/tool_usage.db"
+    db_path = Path(db_path_override or default_db).expanduser()
+    if not db_path.exists():
+        print(f"No tool usage data available (DB not found: {db_path})", file=sys.stderr)
+        return 1
+
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT timestamp, tool_name, target_file, bash_command
+                FROM tool_usage
+                WHERE session_id = ? AND hook_type = 'PreToolUse'
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (session_id, n))
+            rows = cursor.fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        print(f"Error: Failed to query tool usage: {e}", file=sys.stderr)
+        return 1
+
+    if not rows:
+        print(f"No tool usage data for {name} ({session_id})")
+        print("(Hooks may not be active for this session, or it's a Codex agent)")
+        return 0
+
+    # Format output — compute relative time against UTC (DB stores UTC naive strings)
+    now_utc = datetime.utcnow()
+    print(f"Last {len(rows)} actions ({name} {session_id[:8]}):")
+
+    def _rel(ts_str: str) -> str:
+        try:
+            ts = datetime.fromisoformat(ts_str)  # naive UTC
+            delta_s = int((now_utc - ts).total_seconds())
+            if delta_s < 60:
+                return f"{delta_s}s"
+            elif delta_s < 3600:
+                return f"{delta_s // 60}m{delta_s % 60:02d}s"
+            else:
+                return f"{delta_s // 3600}h{(delta_s % 3600) // 60}m"
+        except Exception:
+            return "?"
+
+    for ts_str, tool_name, target_file, bash_command in reversed(rows):
+        elapsed = _rel(ts_str)
+
+        # Format action description
+        if tool_name == "Bash" and bash_command:
+            desc = bash_command[:_BASH_DISPLAY_WIDTH].split('\n')[0]  # first line, truncated
+            action = f"Bash: {desc}"
+        elif tool_name in ("Read", "Write", "Edit", "Glob") and target_file:
+            action = f"{tool_name}: {target_file}"
+        elif tool_name == "Grep":
+            action = "Grep: (search)"
+        elif tool_name == "Task":
+            action = "Task: (subagent)"
+        else:
+            action = tool_name
+
+        print(f"  [{elapsed} ago] {action}")
+
     return 0
 
 
