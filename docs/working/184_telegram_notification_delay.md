@@ -146,7 +146,7 @@ This doesn't fix the root cause but reduces the surface area for timing confusio
    - Implement retry logic in Stop hook handler
    - Re-run the 5-message test
    - Verify all notifications contain current response content
-   - Measure added latency (should be 0 when transcript is ready, ≤1.5s when it's not)
+   - Measure added latency (should be 0 when transcript is ready; ≤300ms for option (c), up to 1.5s if using options (a)/(b) with multiple retries)
 
 3. **Validate Fix 1 (synchronous hook):**
    - Remove `&` and `disown` from `notify_server.sh`
