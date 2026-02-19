@@ -525,8 +525,12 @@ class MessageQueueManager:
             # Codex: set idle flag and deliver immediately, but skip the
             # stop-notification side effects of mark_session_idle() since
             # this isn't a real stop event.
+            # Reset any stale idle status from prior work cycle BEFORE setting is_idle=True.
+            # Without this, _watch_for_idle Phase 3 can see session.status=IDLE from
+            # OutputMonitor and fire a false idle during the delivery window. (#193)
+            self.mark_session_active(target_session_id)
             state = self._get_or_create_state(target_session_id)
-            state.is_idle = True
+            state.is_idle = True  # re-set: mark_session_active clears is_idle; need True to gate delivery
             asyncio.create_task(self._try_deliver_messages(target_session_id))
         # If important mode, trigger check (delivers when response complete)
         elif delivery_mode == "important":
@@ -1706,6 +1710,16 @@ class MessageQueueManager:
                         is_idle = False          # Can't verify, assume in-flight
 
                 if is_idle:
+                    # Log exact state at idle-fire time for root cause confirmation (#193)
+                    _dbg_state = self.delivery_states.get(target_session_id)
+                    logger.info(
+                        f"Watch {watch_id}: idle detected at {elapsed:.1f}s — "
+                        f"state.is_idle={_dbg_state.is_idle if _dbg_state else None}, "
+                        f"session.status={session.status}, "
+                        f"pending={len(self.get_pending_messages(target_session_id))}, "
+                        f"prompt_count={prompt_count}, "
+                        f"pending_idle_count={pending_idle_count}"
+                    )
                     # Suppress if stop notification was already sent to this watcher <10s ago (#216)
                     stop_key = (target_session_id, watcher_session_id)
                     stop_at = self._recent_stop_notifications.get(stop_key)
