@@ -726,6 +726,7 @@ def cmd_dispatch(
     params: dict,
     em_id: Optional[str],
     dry_run: bool = False,
+    no_clear: bool = False,
     delivery_mode: str = "sequential",
     notify_on_stop: bool = True,
 ) -> int:
@@ -738,6 +739,7 @@ def cmd_dispatch(
         params: Dynamic parameters (--issue, --spec, etc.)
         em_id: Sender's session ID
         dry_run: Print expanded template instead of sending
+        no_clear: Skip clearing target session before dispatch
         delivery_mode: Delivery mode for sm send
         notify_on_stop: Notify on stop flag for sm send
 
@@ -776,6 +778,12 @@ def cmd_dispatch(
     if dry_run:
         print(expanded)
         return 0
+
+    # Clear target before dispatch unless opted out (#234).
+    if not no_clear:
+        rc = cmd_clear(client, em_id, agent_id)
+        if rc != 0:
+            return rc
 
     # Auto-arm periodic remind and parent wake on every dispatch (#225-A, #225-C).
     soft_threshold, hard_threshold = get_auto_remind_config(os.getcwd())

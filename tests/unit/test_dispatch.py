@@ -370,15 +370,16 @@ class TestFullDispatch:
         mock_client.session_id = "abc"
         mock_client.send_input.return_value = (True, False)
 
-        with patch("src.cli.commands.os.getcwd", return_value="/tmp"):
-            with patch("src.cli.dispatch.load_template", return_value=sample_config):
-                exit_code = cmd_dispatch(
-                    mock_client, "agent1", "engineer",
-                    {"issue": "42", "spec": "s.md"},
-                    em_id="abc",
-                    delivery_mode="urgent",
-                    notify_on_stop=False,
-                )
+        with patch("src.cli.commands.os.getcwd", return_value="/tmp"), \
+             patch("src.cli.dispatch.load_template", return_value=sample_config), \
+             patch("src.cli.commands.cmd_clear", return_value=0):
+            exit_code = cmd_dispatch(
+                mock_client, "agent1", "engineer",
+                {"issue": "42", "spec": "s.md"},
+                em_id="abc",
+                delivery_mode="urgent",
+                notify_on_stop=False,
+            )
 
         assert exit_code == 0
         # Verify send_input was called
@@ -396,35 +397,35 @@ class TestFullDispatch:
 class TestDeliveryModePassthrough:
     def test_urgent_passthrough(self):
         """--urgent flag produces delivery_mode='urgent'."""
-        _, _, _, mode, _, _ = parse_dispatch_args(
+        _, _, _, _, mode, _, _ = parse_dispatch_args(
             ["agent1", "--role", "engineer", "--urgent", "--issue", "1", "--spec", "s"]
         )
         assert mode == "urgent"
 
     def test_important_passthrough(self):
         """--important flag produces delivery_mode='important'."""
-        _, _, _, mode, _, _ = parse_dispatch_args(
+        _, _, _, _, mode, _, _ = parse_dispatch_args(
             ["agent1", "--role", "engineer", "--important", "--issue", "1", "--spec", "s"]
         )
         assert mode == "important"
 
     def test_steer_passthrough(self):
         """--steer flag produces delivery_mode='steer'."""
-        _, _, _, mode, _, _ = parse_dispatch_args(
+        _, _, _, _, mode, _, _ = parse_dispatch_args(
             ["agent1", "--role", "engineer", "--steer", "--issue", "1", "--spec", "s"]
         )
         assert mode == "steer"
 
     def test_default_sequential(self):
         """No delivery flag defaults to sequential."""
-        _, _, _, mode, _, _ = parse_dispatch_args(
+        _, _, _, _, mode, _, _ = parse_dispatch_args(
             ["agent1", "--role", "engineer", "--issue", "1", "--spec", "s"]
         )
         assert mode == "sequential"
 
     def test_precedence_urgent_over_important(self):
         """--urgent takes precedence over --important."""
-        _, _, _, mode, _, _ = parse_dispatch_args(
+        _, _, _, _, mode, _, _ = parse_dispatch_args(
             ["agent1", "--role", "engineer", "--urgent", "--important", "--issue", "1", "--spec", "s"]
         )
         assert mode == "urgent"
@@ -472,24 +473,25 @@ class TestExistingCommandsUnaffected:
 class TestParseDispatchArgs:
     def test_parses_basic_args(self):
         """Parses agent_id, role, and dynamic params."""
-        agent_id, role, dry_run, mode, notify, params = parse_dispatch_args(
+        agent_id, role, dry_run, no_clear, mode, notify, params = parse_dispatch_args(
             ["my-agent", "--role", "engineer", "--issue", "42", "--spec", "s.md"]
         )
         assert agent_id == "my-agent"
         assert role == "engineer"
         assert dry_run is False
+        assert no_clear is False
         assert params == {"issue": "42", "spec": "s.md"}
 
     def test_parses_dry_run(self):
         """--dry-run flag is captured."""
-        _, _, dry_run, _, _, _ = parse_dispatch_args(
+        _, _, dry_run, _, _, _, _ = parse_dispatch_args(
             ["agent1", "--role", "engineer", "--dry-run", "--issue", "1", "--spec", "s"]
         )
         assert dry_run is True
 
     def test_no_notify_on_stop(self):
         """--no-notify-on-stop sets notify_on_stop to False."""
-        _, _, _, _, notify, _ = parse_dispatch_args(
+        _, _, _, _, _, notify, _ = parse_dispatch_args(
             ["agent1", "--role", "engineer", "--no-notify-on-stop", "--issue", "1", "--spec", "s"]
         )
         assert notify is False
@@ -595,6 +597,7 @@ class TestAutoRemindDispatch:
 
         with patch("src.cli.commands.os.getcwd", return_value="/tmp"), \
              patch("src.cli.dispatch.load_template", return_value=sample_config), \
+             patch("src.cli.commands.cmd_clear", return_value=0), \
              patch("src.cli.dispatch.get_auto_remind_config",
                    return_value=(DEFAULT_DISPATCH_SOFT_THRESHOLD,
                                  DEFAULT_DISPATCH_HARD_THRESHOLD)):
@@ -615,6 +618,7 @@ class TestAutoRemindDispatch:
 
         with patch("src.cli.commands.os.getcwd", return_value="/tmp"), \
              patch("src.cli.dispatch.load_template", return_value=sample_config), \
+             patch("src.cli.commands.cmd_clear", return_value=0), \
              patch("src.cli.dispatch.get_auto_remind_config",
                    return_value=(300, 600)):
             exit_code = cmd_dispatch(
@@ -634,6 +638,7 @@ class TestAutoRemindDispatch:
 
         with patch("src.cli.commands.os.getcwd", return_value="/tmp"), \
              patch("src.cli.dispatch.load_template", return_value=sample_config), \
+             patch("src.cli.commands.cmd_clear", return_value=0), \
              patch("src.cli.dispatch.get_auto_remind_config",
                    return_value=(210, 420)):
             cmd_dispatch(
@@ -864,3 +869,105 @@ class TestDefaultTemplateExpansion:
         config = self._load_default_templates()
         with pytest.raises(DispatchError, match="Missing required parameter"):
             expand_template(config, "engineer", {"issue": "1"}, em_id="x")
+
+
+# ---------------------------------------------------------------------------
+# sm#234: --no-clear flag / default clear behavior
+# ---------------------------------------------------------------------------
+
+class TestNoClearFlag:
+    """Tests for --no-clear flag in parse_dispatch_args and cmd_dispatch (#234)."""
+
+    def test_no_clear_flag_parsed(self):
+        """--no-clear flag sets no_clear=True in return tuple."""
+        _, _, _, no_clear, _, _, _ = parse_dispatch_args(
+            ["agent1", "--role", "engineer", "--no-clear", "--issue", "1", "--spec", "s"]
+        )
+        assert no_clear is True
+
+    def test_no_clear_defaults_to_false(self):
+        """Omitting --no-clear returns no_clear=False."""
+        _, _, _, no_clear, _, _, _ = parse_dispatch_args(
+            ["agent1", "--role", "engineer", "--issue", "1", "--spec", "s"]
+        )
+        assert no_clear is False
+
+    def _make_client(self):
+        mock_client = MagicMock()
+        mock_client.get_session.return_value = {
+            "id": "agent1",
+            "friendly_name": "eng",
+            "status": "running",
+        }
+        mock_client.session_id = "em-abc"
+        mock_client.send_input.return_value = (True, False)
+        return mock_client
+
+    def test_default_clears_before_send(self, sample_config):
+        """Default behavior (no_clear=False) calls cmd_clear before cmd_send."""
+        mock_client = self._make_client()
+
+        with patch("src.cli.commands.os.getcwd", return_value="/tmp"), \
+             patch("src.cli.dispatch.load_template", return_value=sample_config), \
+             patch("src.cli.commands.cmd_clear", return_value=0) as mock_clear:
+            exit_code = cmd_dispatch(
+                mock_client, "agent1", "engineer",
+                {"issue": "42", "spec": "s.md"},
+                em_id="em-abc",
+            )
+
+        assert exit_code == 0
+        mock_clear.assert_called_once_with(mock_client, "em-abc", "agent1")
+        mock_client.send_input.assert_called_once()
+
+    def test_no_clear_skips_clear(self, sample_config):
+        """no_clear=True skips cmd_clear and proceeds directly to send."""
+        mock_client = self._make_client()
+
+        with patch("src.cli.commands.os.getcwd", return_value="/tmp"), \
+             patch("src.cli.dispatch.load_template", return_value=sample_config), \
+             patch("src.cli.commands.cmd_clear", return_value=0) as mock_clear:
+            exit_code = cmd_dispatch(
+                mock_client, "agent1", "engineer",
+                {"issue": "42", "spec": "s.md"},
+                em_id="em-abc",
+                no_clear=True,
+            )
+
+        assert exit_code == 0
+        mock_clear.assert_not_called()
+        mock_client.send_input.assert_called_once()
+
+    def test_dry_run_skips_clear(self, sample_config, capsys):
+        """--dry-run skips cmd_clear regardless of no_clear."""
+        mock_client = self._make_client()
+
+        with patch("src.cli.commands.os.getcwd", return_value="/tmp"), \
+             patch("src.cli.dispatch.load_template", return_value=sample_config), \
+             patch("src.cli.commands.cmd_clear", return_value=0) as mock_clear:
+            exit_code = cmd_dispatch(
+                mock_client, "agent1", "engineer",
+                {"issue": "42", "spec": "s.md"},
+                em_id="em-abc",
+                dry_run=True,
+            )
+
+        assert exit_code == 0
+        mock_clear.assert_not_called()
+        mock_client.send_input.assert_not_called()
+
+    def test_clear_failure_aborts_send(self, sample_config):
+        """When cmd_clear returns non-zero, cmd_send is never called."""
+        mock_client = self._make_client()
+
+        with patch("src.cli.commands.os.getcwd", return_value="/tmp"), \
+             patch("src.cli.dispatch.load_template", return_value=sample_config), \
+             patch("src.cli.commands.cmd_clear", return_value=1):
+            exit_code = cmd_dispatch(
+                mock_client, "agent1", "engineer",
+                {"issue": "42", "spec": "s.md"},
+                em_id="em-abc",
+            )
+
+        assert exit_code == 1
+        mock_client.send_input.assert_not_called()

@@ -549,6 +549,7 @@ class TestCmdDispatchPassesParentSessionId:
 
         with patch("src.cli.dispatch.load_template", return_value=SAMPLE_CONFIG), \
              patch("src.cli.dispatch.get_auto_remind_config", return_value=(210, 420)), \
+             patch("src.cli.commands.cmd_clear", return_value=0), \
              patch("os.getcwd", return_value="/tmp"):
             cmd_dispatch(
                 mock_client,
