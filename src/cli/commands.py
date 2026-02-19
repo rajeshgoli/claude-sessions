@@ -1952,9 +1952,6 @@ def cmd_context_monitor(
 
         # Determine target session
         resolved_target = target or session_id
-        if not resolved_target:
-            print("Error: No session ID — run inside a session or specify a target", file=sys.stderr)
-            return 2
 
         enabled = (action == "enable")
         # notify_session_id: when enabling, notify the CALLER (self), not the target
