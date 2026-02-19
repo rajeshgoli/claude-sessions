@@ -22,7 +22,7 @@ cmd_send()  [cli/main.py:282]
                 → tmux send-keys text + Enter  (NO Escape)
 ```
 
-Escape is sent **only** in `_deliver_urgent()` (message_queue.py:854-860), which is called exclusively for `delivery_mode="urgent"`.
+Within the `sm send` queue delivery paths, Escape is sent **only** in `_deliver_urgent()` (message_queue.py:854-860), which is called exclusively for `delivery_mode="urgent"`. (Other Escape sites exist in the repo — `cmd_clear` and crash recovery — but these are unrelated to the `sm send` delivery path.)
 
 Verified empirically: `inspect.getsource()` on `_try_deliver_messages`, `_deliver_direct`, and `send_input_async` — none reference Escape.
 
@@ -42,13 +42,13 @@ The behavior described as "Escape interrupting active work" is actually **sequen
 | Watch idle notification | important | No | Changed from urgent→important in PR #123 |
 | Watch timeout notification | important | No | Same PR #123 |
 | Stop notification | important | No | Never sent Escape |
-| Scheduled reminders | urgent | Yes | But only for explicit `sm remind` |
+| Scheduled reminders | urgent | Yes | `_fire_reminder` queues urgent; Telegram bot also has an urgent path |
 | `cmd_clear()` | N/A | Yes | Only for `/clear` command |
 | Crash recovery | N/A | Yes | Only for harness restart |
 
 ### Log evidence
 
-Examined `logs/log-20260203-175042.log` (87K lines). All sequential deliveries used `_try_deliver_messages` → `_deliver_direct` → `send_input_async`. No Escape events during sequential delivery. The only Escape events were from explicit urgent deliveries and watch notifications (on older code that used `delivery_mode="urgent"`).
+Examined `logs/log-20260203-175042.log` (87K lines). All sequential deliveries logged `Queued message ... (mode=sequential)` followed by `Delivering ... message(s)` and `Sent input (async)` — consistent with the `_try_deliver_messages` → `_deliver_direct` → `send_input_async` path. Urgent deliveries logged `Queued message ... (mode=urgent)` followed by `Urgent message ... delivered` — consistent with the `_deliver_urgent` path. No tmux-level Escape logging exists (tmux subprocess calls aren't logged individually), so the absence of Escape is inferred from the delivery mode/code path, not from direct Escape log entries.
 
 ## The real problem
 
