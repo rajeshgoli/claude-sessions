@@ -565,8 +565,8 @@ class SessionManagerClient:
         self,
         session_id: str,
         enabled: bool,
+        requester_session_id: str,
         notify_session_id: Optional[str] = None,
-        requester_session_id: str = "",  # Required by server; CLI always passes session_id
     ) -> tuple[Optional[dict], bool, bool]:
         """Enable or disable context monitoring for a session."""
         payload = {

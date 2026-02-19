@@ -1961,7 +1961,7 @@ def cmd_context_monitor(
         notify_session_id = session_id if enabled else None
 
         data, success, unavailable = client.set_context_monitor(
-            resolved_target, enabled, notify_session_id, requester_session_id=session_id
+            resolved_target, enabled, session_id, notify_session_id=notify_session_id
         )
         if unavailable:
             print("Error: Session manager unavailable", file=sys.stderr)
