@@ -3,6 +3,7 @@
 import os
 import re
 import sys
+from datetime import datetime
 from typing import Optional
 
 from .client import SessionManagerClient
@@ -809,7 +810,6 @@ def cmd_remind_stop(client: SessionManagerClient, session_id: str, target_identi
 
     Args:
         client: API client
-        session_id: Current session ID (unused, kept for signature consistency)
         target_identifier: Target session ID or friendly name
 
     Exit codes:
@@ -1147,7 +1147,6 @@ def cmd_children(
 
             # Format last activity as relative time
             if last_activity:
-                from datetime import datetime
                 try:
                     activity_time = datetime.fromisoformat(last_activity)
                     elapsed = format_relative_time(activity_time)
@@ -1162,7 +1161,6 @@ def cmd_children(
             status_age = ""
             if agent_status_at:
                 try:
-                    from datetime import datetime
                     status_time = datetime.fromisoformat(agent_status_at)
                     status_age = f" ({format_relative_time(status_time)} ago)"
                 except Exception:

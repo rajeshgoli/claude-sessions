@@ -872,7 +872,7 @@ class MessageQueueManager:
                         state.stop_notify_sender_name = msg.sender_name
 
                     # Start periodic remind if requested (#188)
-                    if msg.remind_soft_threshold:
+                    if msg.remind_soft_threshold is not None:
                         self.register_periodic_remind(
                             target_session_id=msg.target_session_id,
                             soft_threshold=msg.remind_soft_threshold,
@@ -918,7 +918,7 @@ class MessageQueueManager:
                         state.stop_notify_sender_name = msg.sender_name
 
                     # Start periodic remind if requested (#188)
-                    if msg.remind_soft_threshold:
+                    if msg.remind_soft_threshold is not None:
                         self.register_periodic_remind(
                             target_session_id=msg.target_session_id,
                             soft_threshold=msg.remind_soft_threshold,
@@ -979,7 +979,7 @@ class MessageQueueManager:
                         state.stop_notify_sender_name = msg.sender_name
 
                     # Start periodic remind if requested (#188)
-                    if msg.remind_soft_threshold:
+                    if msg.remind_soft_threshold is not None:
                         self.register_periodic_remind(
                             target_session_id=msg.target_session_id,
                             soft_threshold=msg.remind_soft_threshold,
