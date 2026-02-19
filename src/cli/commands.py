@@ -746,7 +746,7 @@ def cmd_dispatch(
         1: Template/param error or send failed
         2: Session manager unavailable
     """
-    from .dispatch import load_template, expand_template, get_role_params, DispatchError
+    from .dispatch import load_template, expand_template, get_role_params, get_auto_remind_config, DispatchError
 
     try:
         config = load_template(os.getcwd())
@@ -778,7 +778,6 @@ def cmd_dispatch(
         return 0
 
     # Auto-arm periodic remind on every dispatch (#225-A).
-    from .dispatch import get_auto_remind_config
     soft_threshold, hard_threshold = get_auto_remind_config(os.getcwd())
 
     return cmd_send(
