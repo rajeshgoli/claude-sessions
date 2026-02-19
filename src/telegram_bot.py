@@ -1597,8 +1597,8 @@ Provide ONLY the summary, no preamble or questions."""
         """Start updater polling with explicit timeout parameters."""
         await self.application.updater.start_polling(
             poll_interval=0.0,
-            timeout=10,
-            read_timeout=15,
+            timeout=10,        # Telegram server long-poll hold time (seconds)
+            read_timeout=15,   # Per-chunk socket read timeout; effective total = timeout + read_timeout = 25s per poll
             write_timeout=5,
             connect_timeout=5,
             pool_timeout=5,
@@ -1608,9 +1608,9 @@ Provide ONLY the summary, no preamble or questions."""
     async def _polling_health_monitor(self) -> None:
         """Monitor getUpdates polling health and restart the updater if stalled."""
         while True:
-            await asyncio.sleep(30)
+            await asyncio.sleep(30)  # Check interval; must be less than the 45s stall threshold
             elapsed = time.monotonic() - self._last_get_updates_ts
-            if elapsed > 45:
+            if elapsed > 45:  # Stall threshold: exceeds one full poll cycle (timeout=10 + read_timeout=15 = 25s)
                 logger.warning(f"getUpdates stalled for {elapsed:.0f}s, restarting updater")
                 try:
                     await self.application.updater.stop()

@@ -99,17 +99,18 @@ class TestPollingHealthMonitor:
         bot.application = mock_application
         bot._last_get_updates_ts = time.monotonic()  # just now
 
-        # Run one cycle of the monitor with a mocked sleep that doesn't actually sleep
-        async def run_one_cycle():
-            with patch("asyncio.sleep", new=AsyncMock()):
-                # Manually execute one iteration's logic
-                elapsed = time.monotonic() - bot._last_get_updates_ts
-                if elapsed > 45:
-                    await bot.application.updater.stop()
-                    bot._last_get_updates_ts = time.monotonic()
-                    await bot._start_polling()
+        call_count = 0
 
-        await run_one_cycle()
+        async def fake_sleep(seconds):
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                raise asyncio.CancelledError()
+
+        with patch("asyncio.sleep", fake_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                await bot._polling_health_monitor()
+
         mock_application.updater.stop.assert_not_called()
         mock_application.updater.start_polling.assert_not_called()
 
@@ -119,13 +120,17 @@ class TestPollingHealthMonitor:
         bot.application = mock_application
         bot._last_get_updates_ts = time.monotonic() - 60  # 60s ago → stalled
 
-        # Simulate one monitor iteration (stall detected path)
-        elapsed = time.monotonic() - bot._last_get_updates_ts
-        assert elapsed > 45  # confirm stall condition
+        call_count = 0
 
-        await bot.application.updater.stop()
-        bot._last_get_updates_ts = time.monotonic()
-        await bot._start_polling()
+        async def fake_sleep(seconds):
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                raise asyncio.CancelledError()
+
+        with patch("asyncio.sleep", fake_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                await bot._polling_health_monitor()
 
         mock_application.updater.stop.assert_called_once()
         mock_application.updater.start_polling.assert_called_once_with(
@@ -160,12 +165,28 @@ class TestPollingHealthMonitor:
         bot.application = mock_application
         bot._last_get_updates_ts = time.monotonic() - 60
 
+        call_count = 0
+        ts_at_start_polling: list[float] = []
+
+        async def fake_sleep(seconds):
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                raise asyncio.CancelledError()
+
+        async def recording_start_polling(*args, **kwargs):
+            ts_at_start_polling.append(bot._last_get_updates_ts)
+
+        mock_application.updater.start_polling.side_effect = recording_start_polling
+
         before = time.monotonic()
-        await bot.application.updater.stop()
-        bot._last_get_updates_ts = time.monotonic()
+        with patch("asyncio.sleep", fake_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                await bot._polling_health_monitor()
         after = time.monotonic()
 
-        assert before <= bot._last_get_updates_ts <= after
+        assert len(ts_at_start_polling) == 1
+        assert before <= ts_at_start_polling[0] <= after
 
     @pytest.mark.asyncio
     async def test_health_monitor_survives_restart_error(self, bot, mock_application):
@@ -175,16 +196,22 @@ class TestPollingHealthMonitor:
 
         mock_application.updater.stop.side_effect = RuntimeError("updater already stopped")
 
-        # Simulate one stalled monitor iteration — should not raise
-        elapsed = time.monotonic() - bot._last_get_updates_ts
-        assert elapsed > 45
+        call_count = 0
 
-        try:
-            await bot.application.updater.stop()
-            bot._last_get_updates_ts = time.monotonic()
-            await bot._start_polling()
-        except Exception:
-            pass  # error is caught inside the monitor loop
+        async def fake_sleep(seconds):
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                raise asyncio.CancelledError()
+
+        # The RuntimeError from stop() is caught by the monitor's except Exception block;
+        # the loop continues and exits on the second sleep call.
+        with patch("asyncio.sleep", fake_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                await bot._polling_health_monitor()
+
+        mock_application.updater.stop.assert_called_once()
+        mock_application.updater.start_polling.assert_not_called()  # not reached after error
 
 
 # ---------------------------------------------------------------------------
