@@ -157,12 +157,11 @@ POSTs {session_id, used_percentage, total_tokens} to sm server
     ↓
 sm server stores in Session.tokens_used
     ↓
-If used_percentage > warning_pct → send context warning to agent
-If used_percentage > critical_pct → send urgent handoff trigger
-If used_percentage < warning_pct and flags set → reset one-shot flags
+If used_percentage > warning_pct → send context warning to agent (one-shot)
+If used_percentage > critical_pct → send urgent handoff trigger (one-shot)
 ```
 
-### Layer 2: PreCompact Hook (Safety Net — Last Chance)
+### Layer 2: PreCompact Hook (Safety Net — Last Chance + Flag Reset)
 
 If the agent ignores warnings and compaction is imminent:
 
@@ -171,10 +170,14 @@ PreCompact hook fires (trigger=auto)
     ↓
 Hook script POSTs {session_id, event: "compaction", trigger: "auto"} to sm server
     ↓
+sm resets _context_warning_sent and _context_critical_sent flags
+    ↓
 sm logs warning: "Compaction triggered — handoff was too late"
     ↓
 sm sends urgent notification to parent session / user
 ```
+
+**Why reset flags here, not in the status line handler:** Post-compaction context can land anywhere between 55K–110K tokens. With a 200K window and warning at 50% (100K), the post-compaction percentage may remain above 50%. Resetting flags in the `used_pct < warning_pct` branch is unreliable — it fails whenever compaction leaves context above the warning threshold. PreCompact is the reliable reset point: it fires on every compaction, always before context is refreshed. Flags reset here re-arm warnings correctly for the next accumulation cycle.
 
 ### Layer 3: SessionStart `compact` (Recovery — Post-Compaction)
 
@@ -200,10 +203,10 @@ Based on empirical data (context_window_size=200K):
 
 | Threshold | used_percentage | Tokens (~) | Action |
 |-----------|----------------|------------|--------|
-| Warning | 50% | 100K | Sequential reminder: consider handoff |
-| Critical | 65% | 130K | Urgent: write handoff doc NOW |
-| Compaction | 80-85% | ~160K | PreCompact fires — too late for clean handoff |
-| Reset | < warning_pct | — | Clear one-shot flags (context refreshed by compaction) |
+| Warning | 50% | 100K | Sequential reminder: consider handoff (one-shot per cycle) |
+| Critical | 65% | 130K | Urgent: write handoff doc NOW (one-shot per cycle) |
+| Compaction | 80-85% | ~160K | PreCompact fires — resets flags, notifies parent |
+| Post-compaction | 55%–110K tokens typical | variable | Flags already reset by PreCompact; new cycle starts |
 
 These are configurable via sm config. Default values are conservative.
 
@@ -361,6 +364,13 @@ async def hook_context_usage(request: Request):
     # Handle compaction event (from PreCompact hook)
     if data.get("event") == "compaction":
         logger.warning(f"Compaction fired for {session.friendly_name or session_id} (trigger={data.get('trigger')})")
+        # Reset one-shot flags here — PreCompact fires before context is refreshed,
+        # so this is the reliable reset point for the next accumulation cycle.
+        # Cannot rely on used_pct < warning_pct because post-compaction context
+        # may land above the warning threshold (documented range: 55K–110K tokens,
+        # warning at 50% = 100K — overlap is possible).
+        session._context_warning_sent = False
+        session._context_critical_sent = False
         # Notify parent session / user
         if session.parent_session_id and queue_mgr:
             msg = f"[sm context] Compaction fired for {session.friendly_name or session_id}. Context was lost."
@@ -378,12 +388,6 @@ async def hook_context_usage(request: Request):
     config = app.state.config.get("context_monitor", {})
     warning_pct = config.get("warning_percentage", 50)
     critical_pct = config.get("critical_percentage", 65)
-
-    # Reset one-shot flags when context drops below warning threshold
-    # (happens after compaction or /clear — indicates a fresh context)
-    if used_pct < warning_pct:
-        session._context_warning_sent = False
-        session._context_critical_sent = False
 
     if used_pct >= critical_pct:
         if not getattr(session, '_context_critical_sent', False):
@@ -430,28 +434,47 @@ context_monitor:
 
 ### `last_handoff_path` field
 
-The recovery hook (Layer 3) needs to find the handoff doc after compaction fires. This requires coordination with sm#196:
+The recovery hook (Layer 3) needs to find the handoff doc after compaction fires. This requires coordination with sm#196 and an explicit server update in sm#203. Three changes are required:
 
-**sm#196 must add** `last_handoff_path: Optional[str] = None` to the `Session` model (persisted in `state.json`). After `_execute_handoff` completes successfully, set:
+**1. Session model** (`src/models.py`) — sm#196 or sm#203:
+
+Add to the `Session` dataclass/model:
+```python
+last_handoff_path: Optional[str] = None  # Last successfully executed handoff doc path (#196/#203)
+```
+
+**2. `_execute_handoff` success path** (`src/message_queue.py`) — sm#196:
+
+After successful execution, persist the path and reset context flags:
 ```python
 session.last_handoff_path = file_path
 self.session_manager._save_state()
-```
-
-**sm#203 exposes** `last_handoff_path` via the existing `GET /sessions/{session_id}` endpoint (no new endpoint needed — the field is part of the Session model, which is already serialized to JSON in that response).
-
-**Flag reset:** When sm executes a handoff (in `_execute_handoff`), reset context monitor flags:
-```python
+# Re-arm context monitor flags for the new cycle
 session._context_warning_sent = False
 session._context_critical_sent = False
 ```
-This ensures warnings re-arm correctly in the new context cycle after handoff.
+
+**3. `SessionResponse` and `GET /sessions/{id}` mapping** (`src/server.py`) — sm#203:
+
+`GET /sessions/{session_id}` uses an explicit `SessionResponse` Pydantic model with fixed fields (lines 76–89). New model fields are **not** automatically serialized — each must be explicitly added.
+
+Add to `SessionResponse`:
+```python
+last_handoff_path: Optional[str] = None
+```
+
+Add to every `SessionResponse(...)` constructor call in `server.py` (create, get, update, list endpoints):
+```python
+last_handoff_path=session.last_handoff_path,
+```
+
+Without this, the recovery script's `jq -r '.last_handoff_path // empty'` call will always return empty, silently breaking recovery.
 
 ## Integration Points
 
 | Feature | Integration |
 |---------|-------------|
-| sm#196 (sm handoff) | This ticket provides the trigger; sm#196 provides the mechanism. Agent writes handoff doc, calls `sm handoff`. sm#196 must persist `last_handoff_path` on Session for recovery. |
+| sm#196 (sm handoff) | This ticket provides the trigger; sm#196 provides the mechanism. Agent writes handoff doc, calls `sm handoff`. sm#196 must persist `last_handoff_path` on Session. sm#203 must add `last_handoff_path` to `SessionResponse` and all `GET /sessions` mappings. |
 | sm#188 (sm remind) | Context warnings use the same `queue_message` delivery mechanism as periodic reminders. |
 | Session.tokens_used | Already exists in model. Populated with real data from status line. |
 | Session.transcript_path | Already stored. Available in all hooks. |
@@ -477,10 +500,11 @@ If sm is reconfigured to listen on a non-loopback interface, hook scripts should
 
 1. **Unit test:** Mock status line JSON input. Verify `context_monitor.sh` extracts correct fields and POSTs to sm with `jq -n`-assembled JSON.
 2. **Unit test:** Verify server endpoint one-shot flag logic:
-   - Warning flag fires once at 50%, suppressed on repeat
+   - Warning flag fires once at 50%, suppressed on repeat calls at same percentage
    - Critical flag fires once at 65%, suppressed on repeat
-   - Both flags reset when `used_pct` drops below `warning_pct`
+   - Both flags reset on `event == "compaction"` — even if post-compaction `used_pct` would be above `warning_pct` (test with simulated 55% post-compaction)
    - Flags reset when `_execute_handoff` runs (sm#196 coordination)
+   - **Anti-regression:** Flags NOT reset by `used_pct < warning_pct` in status line updates — verify this path no longer exists
 3. **Integration test:** Configure status line, run a session, verify `tokens_used` updates on Session model.
 4. **Manual test:** Run a long session and observe:
    - Status line shows context percentage in TUI
@@ -504,4 +528,8 @@ Single ticket. One engineer can implement:
 4. Threshold checking and message delivery
 5. One-shot flag reset logic
 
-The sm#196 handoff mechanism (what happens when the agent runs `sm handoff`) is a separate ticket. sm#196 must add `last_handoff_path` to Session model and set it in `_execute_handoff` — this is a small addition documented under [sm#196 Coordination](#sm196-coordination) above.
+The sm#196 handoff mechanism (what happens when the agent runs `sm handoff`) is a separate ticket. Required coordination work is split:
+- sm#196: add `last_handoff_path` to `Session` model, set in `_execute_handoff`, reset context flags
+- sm#203: add `last_handoff_path` to `SessionResponse` (explicit Pydantic model) and all `/sessions` response constructors
+
+Both are small additions (1–5 lines each) documented under [sm#196 Coordination](#sm196-coordination) above.
