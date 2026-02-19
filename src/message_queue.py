@@ -289,6 +289,24 @@ class MessageQueueManager:
             asyncio.create_task(self._try_deliver_messages(session_id))
             return
 
+        # Suppress redundant stop notification if agent recently sm-sent to the
+        # same target that would receive the notification (#182)
+        SUPPRESSION_WINDOW_SECONDS = 30
+        if state.stop_notify_sender_id and state.last_outgoing_sm_send_target:
+            if (state.stop_notify_sender_id == state.last_outgoing_sm_send_target
+                    and state.last_outgoing_sm_send_at
+                    and (datetime.now() - state.last_outgoing_sm_send_at).total_seconds()
+                        < SUPPRESSION_WINDOW_SECONDS):
+                logger.info(
+                    f"Suppressing stop notification for {session_id}: "
+                    f"agent sm-sent to {state.stop_notify_sender_id} "
+                    f"{(datetime.now() - state.last_outgoing_sm_send_at).total_seconds():.1f}s ago (#182)"
+                )
+                state.stop_notify_sender_id = None
+                state.stop_notify_sender_name = None
+                state.last_outgoing_sm_send_target = None
+                state.last_outgoing_sm_send_at = None
+
         # Send stop notification if a sender is waiting
         if state.stop_notify_sender_id:
             asyncio.create_task(self._send_stop_notification(
