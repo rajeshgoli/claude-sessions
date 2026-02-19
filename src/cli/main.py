@@ -3,19 +3,63 @@
 import argparse
 import sys
 import os
+from typing import Optional
 
 from .client import SessionManagerClient
 from . import commands
 
 
+def _handle_dispatch(session_id: Optional[str]) -> int:
+    """Handle 'sm dispatch' with two-phase argument parsing.
+
+    Intercepts dispatch before the main argparse to support dynamic
+    CLI flags derived from role templates. This keeps dynamic parsing
+    completely isolated — existing commands retain strict validation.
+    """
+    from .dispatch import parse_dispatch_args
+
+    agent_id, role, dry_run, delivery_mode, notify_on_stop, dynamic_params = \
+        parse_dispatch_args(sys.argv[2:])
+
+    # em_id check: required for send mode, placeholder for dry-run
+    em_id = session_id
+    if not em_id and not dry_run:
+        print(
+            "Error: CLAUDE_SESSION_MANAGER_ID not set. "
+            "Use --dry-run to test templates outside managed sessions.",
+            file=sys.stderr,
+        )
+        return 1
+
+    client = SessionManagerClient()
+    return commands.cmd_dispatch(
+        client, agent_id, role, dynamic_params, em_id,
+        dry_run=dry_run, delivery_mode=delivery_mode,
+        notify_on_stop=notify_on_stop,
+    )
+
+
 def main():
     """Main entry point for sm CLI."""
+    # Pre-intercept: dispatch uses two-phase parsing for dynamic flags.
+    # Must be handled before parser.parse_args() to avoid rejecting
+    # role-specific flags like --issue, --spec, etc.
+    if len(sys.argv) >= 2 and sys.argv[1] == "dispatch":
+        session_id = os.environ.get("CLAUDE_SESSION_MANAGER_ID")
+        sys.exit(_handle_dispatch(session_id))
+
     parser = argparse.ArgumentParser(
         prog="sm",
         description="Session Manager CLI - coordinate multiple Claude agents",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Command to execute")
+
+    # sm dispatch — pre-intercepted above; stub registered here for visibility in sm --help
+    subparsers.add_parser(
+        "dispatch",
+        help="Dispatch a role template to an agent (see .sm/dispatch_templates.yaml)",
+    )
 
     # sm name <friendly-name> OR sm name <session> <friendly-name>
     name_parser = subparsers.add_parser("name", help="Set friendly name for self or a child session")
