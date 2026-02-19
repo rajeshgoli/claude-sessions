@@ -743,6 +743,15 @@ class MessageQueueManager:
                 logger.debug(f"User typing detected at final gate, aborting delivery")
                 return
 
+            # Verify prompt is visible for Claude sessions (sm#183)
+            # Catches stale is_idle when agent started a new turn without
+            # session manager involvement (e.g. user typed directly in tmux)
+            if getattr(session, "provider", "claude") == "claude":
+                prompt_visible = await self._check_idle_prompt(session.tmux_session)
+                if not prompt_visible:
+                    logger.info(f"Session {session_id} is_idle=True but no prompt visible, deferring delivery")
+                    return
+
             # Batch messages (up to max_batch_size)
             batch = messages[:self.max_batch_size]
 
