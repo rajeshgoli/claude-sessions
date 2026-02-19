@@ -10,13 +10,15 @@ Six approaches were evaluated. Three official Claude Code mechanisms were discov
 
 ### Approach 1: Status Line API — AVAILABLE, RECOMMENDED PRIMARY
 
-Claude Code supports a `statusLine` setting in `~/.claude/settings.json` that runs a shell command and pipes full context window data via stdin as JSON:
+Claude Code supports a `statusLine` setting in `~/.claude/settings.json` that runs a shell command and pipes full context window data via stdin as JSON.
+
+**Configuration format** (object form — the only documented format per [status line docs](https://code.claude.com/docs/en/statusline)):
 
 ```json
 {
   "statusLine": {
     "type": "command",
-    "command": "~/.claude/statusline.sh",
+    "command": "~/.claude/hooks/context_monitor.sh",
     "padding": 2
   }
 }
@@ -51,6 +53,8 @@ The stdin JSON includes (confirmed fields):
 ```
 
 **Key fields:** `used_percentage`, `remaining_percentage`, `context_window_size` — pre-calculated by Claude Code.
+
+**`used_percentage` is input-based only:** calculated as `input_tokens + cache_creation_input_tokens + cache_read_input_tokens` — it does not include `output_tokens`. This means it slightly underestimates true context pressure. Thresholds are calibrated accordingly.
 
 **Update frequency:** After each assistant message, on permission mode change, or vim mode toggle. Debounced at 300ms.
 
@@ -90,7 +94,7 @@ Matchers: `auto` (context window full) or `manual` (`/compact` command).
 }
 ```
 
-SessionStart hooks can inject `additionalContext` via JSON output — the documented pattern for "re-inject context after compaction."
+SessionStart hooks can inject `additionalContext` via `hookSpecificOutput` — the documented pattern for "re-inject context after compaction."
 
 **Verdict:** Use as last-resort recovery — inject handoff doc content into post-compaction context.
 
@@ -155,6 +159,7 @@ sm server stores in Session.tokens_used
     ↓
 If used_percentage > warning_pct → send context warning to agent
 If used_percentage > critical_pct → send urgent handoff trigger
+If used_percentage < warning_pct and flags set → reset one-shot flags
 ```
 
 ### Layer 2: PreCompact Hook (Safety Net — Last Chance)
@@ -164,7 +169,7 @@ If the agent ignores warnings and compaction is imminent:
 ```
 PreCompact hook fires (trigger=auto)
     ↓
-Hook script POSTs {session_id, event: "compaction_imminent"} to sm server
+Hook script POSTs {session_id, event: "compaction", trigger: "auto"} to sm server
     ↓
 sm logs warning: "Compaction triggered — handoff was too late"
     ↓
@@ -178,12 +183,16 @@ If compaction fires despite warnings, recover gracefully:
 ```
 SessionStart fires with source=compact
     ↓
-Hook script checks if handoff doc exists for this session
+Hook script queries sm server: GET /sessions/{SM_SESSION_ID}
     ↓
-If yes: outputs additionalContext with handoff doc content
+If session has last_handoff_path set → reads handoff doc content
+    ↓
+Outputs hookSpecificOutput.additionalContext with handoff doc content
     ↓
 Agent resumes with handoff context injected
 ```
+
+**Dependency:** Recovery requires sm#196's `_execute_handoff` to persist the executed handoff path to `session.last_handoff_path` (a new field on the Session model). See the [sm#196 coordination note](#sm196-coordination) below.
 
 ### Thresholds
 
@@ -194,6 +203,7 @@ Based on empirical data (context_window_size=200K):
 | Warning | 50% | 100K | Sequential reminder: consider handoff |
 | Critical | 65% | 130K | Urgent: write handoff doc NOW |
 | Compaction | 80-85% | ~160K | PreCompact fires — too late for clean handoff |
+| Reset | < warning_pct | — | Clear one-shot flags (context refreshed by compaction) |
 
 These are configurable via sm config. Default values are conservative.
 
@@ -218,9 +228,16 @@ SM_SESSION_ID="${CLAUDE_SESSION_MANAGER_ID}"
 
 if [ -n "$SM_SESSION_ID" ] && [ "$USED_PCT" != "null" ] && [ "$USED_PCT" != "0" ]; then
   # Post to sm server (non-blocking, short timeout)
+  # sm server only listens on 127.0.0.1 — this call is localhost-only (trusted)
   curl -s --max-time 0.5 -X POST http://localhost:8420/hooks/context-usage \
     -H "Content-Type: application/json" \
-    -d "{\"session_id\": \"$SM_SESSION_ID\", \"used_percentage\": $USED_PCT, \"total_input_tokens\": $TOTAL_INPUT, \"total_output_tokens\": $TOTAL_OUTPUT, \"context_window_size\": $CONTEXT_SIZE}" \
+    -d "$(jq -n \
+          --arg sid "$SM_SESSION_ID" \
+          --argjson pct "$USED_PCT" \
+          --argjson tin "$TOTAL_INPUT" \
+          --argjson tout "$TOTAL_OUTPUT" \
+          --argjson csz "$CONTEXT_SIZE" \
+          '{session_id: $sid, used_percentage: $pct, total_input_tokens: $tin, total_output_tokens: $tout, context_window_size: $csz}')" \
     >/dev/null 2>&1 &
 fi
 
@@ -230,7 +247,7 @@ echo "${USED_PCT}% ctx"
 
 #### 2. Settings.json configuration
 
-Add to `~/.claude/settings.json`:
+**Merge** the following into `~/.claude/settings.json` (do not replace the entire file):
 
 ```json
 {
@@ -241,7 +258,9 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-#### 3. PreCompact hook (add to settings.json hooks)
+#### 3. PreCompact hook (merge into settings.json hooks)
+
+**Merge** the following into the `hooks` section of `~/.claude/settings.json`:
 
 ```json
 {
@@ -268,15 +287,19 @@ SM_SESSION_ID="${CLAUDE_SESSION_MANAGER_ID}"
 TRIGGER=$(echo "$INPUT" | jq -r '.trigger // "unknown"')
 
 if [ -n "$SM_SESSION_ID" ]; then
+  # sm server only listens on 127.0.0.1 — localhost-only trusted call
   curl -s --max-time 0.5 -X POST http://localhost:8420/hooks/context-usage \
     -H "Content-Type: application/json" \
-    -d "{\"session_id\": \"$SM_SESSION_ID\", \"event\": \"compaction\", \"trigger\": \"$TRIGGER\"}" \
+    -d "$(jq -n --arg sid "$SM_SESSION_ID" --arg trig "$TRIGGER" \
+          '{session_id: $sid, event: "compaction", trigger: $trig}')" \
     >/dev/null 2>&1
 fi
 exit 0
 ```
 
 #### 4. SessionStart compact recovery hook
+
+**Merge** into the `hooks` section of `~/.claude/settings.json`:
 
 ```json
 {
@@ -301,12 +324,24 @@ exit 0
 #!/bin/bash
 INPUT=$(cat)
 SM_SESSION_ID="${CLAUDE_SESSION_MANAGER_ID}"
-HANDOFF_DOC="/tmp/claude-sessions/${SM_SESSION_ID}_handoff.md"
 
-# If a handoff doc exists for this session, inject it as additional context
-if [ -f "$HANDOFF_DOC" ]; then
-  CONTENT=$(cat "$HANDOFF_DOC" | jq -Rs .)
-  echo "{\"additionalContext\": $CONTENT}"
+if [ -z "$SM_SESSION_ID" ]; then
+  exit 0
+fi
+
+# Query sm server for the last handoff path (set by sm#196 _execute_handoff)
+# sm server only listens on 127.0.0.1 — localhost-only trusted call
+HANDOFF_PATH=$(curl -s --max-time 2 http://localhost:8420/sessions/"$SM_SESSION_ID" \
+  | jq -r '.last_handoff_path // empty')
+
+# If a handoff doc was previously executed for this session, inject it as additional context
+if [ -n "$HANDOFF_PATH" ] && [ -f "$HANDOFF_PATH" ]; then
+  jq -n --rawfile ctx "$HANDOFF_PATH" '{
+    hookSpecificOutput: {
+      hookEventName: "SessionStart",
+      additionalContext: $ctx
+    }
+  }'
 fi
 ```
 
@@ -321,13 +356,19 @@ async def hook_context_usage(request: Request):
     if not session:
         return {"status": "unknown_session"}
 
-    # Handle compaction event
+    queue_mgr = app.state.session_manager.message_queue_manager
+
+    # Handle compaction event (from PreCompact hook)
     if data.get("event") == "compaction":
         logger.warning(f"Compaction fired for {session.friendly_name or session_id} (trigger={data.get('trigger')})")
         # Notify parent session / user
-        if session.parent_session_id:
+        if session.parent_session_id and queue_mgr:
             msg = f"[sm context] Compaction fired for {session.friendly_name or session_id}. Context was lost."
-            await message_queue.deliver(session.parent_session_id, msg, mode=DeliveryMode.SEQUENTIAL)
+            queue_mgr.queue_message(
+                target_session_id=session.parent_session_id,
+                text=msg,
+                delivery_mode="sequential",
+            )
         return {"status": "compaction_logged"}
 
     # Handle context usage update
@@ -338,24 +379,40 @@ async def hook_context_usage(request: Request):
     warning_pct = config.get("warning_percentage", 50)
     critical_pct = config.get("critical_percentage", 65)
 
+    # Reset one-shot flags when context drops below warning threshold
+    # (happens after compaction or /clear — indicates a fresh context)
+    if used_pct < warning_pct:
+        session._context_warning_sent = False
+        session._context_critical_sent = False
+
     if used_pct >= critical_pct:
         if not getattr(session, '_context_critical_sent', False):
             session._context_critical_sent = True
-            msg = (
-                f"[sm context] Context at {used_pct}% — critically high. "
-                "Write your handoff doc NOW and run `sm handoff <path>`. "
-                "Compaction is imminent."
-            )
-            await message_queue.deliver(session.id, msg, mode=DeliveryMode.URGENT)
+            if queue_mgr:
+                msg = (
+                    f"[sm context] Context at {used_pct}% — critically high. "
+                    "Write your handoff doc NOW and run `sm handoff <path>`. "
+                    "Compaction is imminent."
+                )
+                queue_mgr.queue_message(
+                    target_session_id=session.id,
+                    text=msg,
+                    delivery_mode="urgent",
+                )
     elif used_pct >= warning_pct:
         if not getattr(session, '_context_warning_sent', False):
             session._context_warning_sent = True
-            total = data.get("total_input_tokens", 0)
-            msg = (
-                f"[sm context] Context at {used_pct}% ({total:,} tokens). "
-                "Consider writing a handoff doc and running `sm handoff <path>`."
-            )
-            await message_queue.deliver(session.id, msg, mode=DeliveryMode.SEQUENTIAL)
+            if queue_mgr:
+                total = data.get("total_input_tokens", 0)
+                msg = (
+                    f"[sm context] Context at {used_pct}% ({total:,} tokens). "
+                    "Consider writing a handoff doc and running `sm handoff <path>`."
+                )
+                queue_mgr.queue_message(
+                    target_session_id=session.id,
+                    text=msg,
+                    delivery_mode="sequential",
+                )
 
     return {"status": "ok", "used_percentage": used_pct}
 ```
@@ -369,15 +426,45 @@ context_monitor:
   critical_percentage: 65      # used_percentage to send urgent handoff
 ```
 
+## sm#196 Coordination
+
+### `last_handoff_path` field
+
+The recovery hook (Layer 3) needs to find the handoff doc after compaction fires. This requires coordination with sm#196:
+
+**sm#196 must add** `last_handoff_path: Optional[str] = None` to the `Session` model (persisted in `state.json`). After `_execute_handoff` completes successfully, set:
+```python
+session.last_handoff_path = file_path
+self.session_manager._save_state()
+```
+
+**sm#203 exposes** `last_handoff_path` via the existing `GET /sessions/{session_id}` endpoint (no new endpoint needed — the field is part of the Session model, which is already serialized to JSON in that response).
+
+**Flag reset:** When sm executes a handoff (in `_execute_handoff`), reset context monitor flags:
+```python
+session._context_warning_sent = False
+session._context_critical_sent = False
+```
+This ensures warnings re-arm correctly in the new context cycle after handoff.
+
 ## Integration Points
 
 | Feature | Integration |
 |---------|-------------|
-| sm#196 (sm handoff) | This ticket provides the trigger; sm#196 provides the mechanism. Agent writes handoff doc, calls `sm handoff`. |
-| sm#188 (sm remind) | Context warnings use the same delivery mechanism as periodic reminders. |
+| sm#196 (sm handoff) | This ticket provides the trigger; sm#196 provides the mechanism. Agent writes handoff doc, calls `sm handoff`. sm#196 must persist `last_handoff_path` on Session for recovery. |
+| sm#188 (sm remind) | Context warnings use the same `queue_message` delivery mechanism as periodic reminders. |
 | Session.tokens_used | Already exists in model. Populated with real data from status line. |
 | Session.transcript_path | Already stored. Available in all hooks. |
 | PreCompact + SessionStart hooks | New hooks added to settings.json. |
+
+## Security: Localhost Trust Boundary
+
+All hook scripts POST to `http://localhost:8420`. This is safe because:
+- sm server binds to `127.0.0.1` by default (not `0.0.0.0`)
+- Only local processes can reach the server
+- No authentication is required for hook endpoints, consistent with existing hook design
+
+If sm is reconfigured to listen on a non-loopback interface, hook scripts should add appropriate authentication.
 
 ## What This Does NOT Do
 
@@ -388,20 +475,25 @@ context_monitor:
 
 ## Test Plan
 
-1. **Unit test:** Mock status line JSON input. Verify context_monitor.sh extracts correct fields and POSTs to sm.
-2. **Unit test:** Verify server endpoint threshold logic (warning at 50%, critical at 65%, debounce).
-3. **Integration test:** Configure status line, run a session, verify tokens_used updates on Session model.
+1. **Unit test:** Mock status line JSON input. Verify `context_monitor.sh` extracts correct fields and POSTs to sm with `jq -n`-assembled JSON.
+2. **Unit test:** Verify server endpoint one-shot flag logic:
+   - Warning flag fires once at 50%, suppressed on repeat
+   - Critical flag fires once at 65%, suppressed on repeat
+   - Both flags reset when `used_pct` drops below `warning_pct`
+   - Flags reset when `_execute_handoff` runs (sm#196 coordination)
+3. **Integration test:** Configure status line, run a session, verify `tokens_used` updates on Session model.
 4. **Manual test:** Run a long session and observe:
    - Status line shows context percentage in TUI
-   - Warning message delivered at 50%
-   - Critical message delivered at 65%
+   - Warning message delivered at 50% (once, not on every update)
+   - Critical message delivered at 65% (once)
    - PreCompact notification logged if compaction fires
 5. **Edge cases:**
    - `used_percentage` is null (before first API call)
-   - Session not tracked by sm (no CLAUDE_SESSION_MANAGER_ID)
-   - sm server down (status line script should not block)
-   - Multiple rapid status line updates (debounce in server)
-   - Post-compaction recovery with and without handoff doc
+   - Session not tracked by sm (no `CLAUDE_SESSION_MANAGER_ID`)
+   - sm server down (status line script should not block — async curl with 0.5s timeout)
+   - Multiple rapid status line updates (one-shot flags prevent duplicate messages)
+   - Post-compaction recovery with `last_handoff_path` set (re-injects doc)
+   - Post-compaction recovery with no prior handoff (no output, exits cleanly)
 
 ## Ticket Classification
 
@@ -410,5 +502,6 @@ Single ticket. One engineer can implement:
 2. PreCompact + SessionStart hook scripts
 3. Server `/hooks/context-usage` endpoint
 4. Threshold checking and message delivery
+5. One-shot flag reset logic
 
-The sm#196 handoff mechanism (what happens when the agent runs `sm handoff`) is a separate ticket.
+The sm#196 handoff mechanism (what happens when the agent runs `sm handoff`) is a separate ticket. sm#196 must add `last_handoff_path` to Session model and set it in `_execute_handoff` — this is a small addition documented under [sm#196 Coordination](#sm196-coordination) above.
