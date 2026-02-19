@@ -485,7 +485,7 @@ class TestRegistrationGate:
         assert queue_mgr.queue_message.called
         call_kwargs = queue_mgr.queue_message.call_args[1]
         assert call_kwargs["target_session_id"] == "parent-abc"
-        assert "Compaction fired" in call_kwargs["text"] or "compaction" in call_kwargs["text"].lower()
+        assert "Compaction fired" in call_kwargs["text"]
 
     def test_warning_still_gated_when_monitor_disabled(self, mock_session_manager, session):
         """Warning/critical usage events still gated behind context_monitor_enabled (#206, #210)."""
