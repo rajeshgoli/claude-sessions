@@ -677,6 +677,12 @@ class SessionManager:
                     notify_after_seconds=notify_after_seconds,
                     notify_on_stop=notify_on_stop,
                 )
+                # Record outgoing sm send for deferred stop notification suppression (#182)
+                # Placed after queue_message to ensure message was persisted first.
+                if from_sm_send and sender_session_id:
+                    sender_state = self.message_queue_manager._get_or_create_state(sender_session_id)
+                    sender_state.last_outgoing_sm_send_target = session_id
+                    sender_state.last_outgoing_sm_send_at = datetime.now()
                 # Return DELIVERED if idle (will be delivered immediately), else QUEUED
                 return DeliveryResult.DELIVERED if is_idle else DeliveryResult.QUEUED
 
@@ -693,6 +699,11 @@ class SessionManager:
                     notify_after_seconds=notify_after_seconds,
                     notify_on_stop=notify_on_stop,
                 )
+                # Record outgoing sm send for deferred stop notification suppression (#182)
+                if from_sm_send and sender_session_id:
+                    sender_state = self.message_queue_manager._get_or_create_state(sender_session_id)
+                    sender_state.last_outgoing_sm_send_target = session_id
+                    sender_state.last_outgoing_sm_send_at = datetime.now()
                 # Urgent always delivers (sends Escape first), important waits
                 if delivery_mode == "urgent":
                     return DeliveryResult.DELIVERED
