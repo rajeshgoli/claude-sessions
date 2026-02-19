@@ -2437,6 +2437,8 @@ def cmd_em(
                 line_parts.append("Warning: context monitoring failed")
                 ok = False
 
+            # Fixed policy: matches server defaults (soft=180s, hard=soft+gap=180+120=300s).
+            # Client cannot read server config — sm#233 spec / Remind Threshold Policy.
             remind_result = client.register_remind(child_id, soft_threshold=180, hard_threshold=300)
             if remind_result is not None:
                 line_parts.append("remind registered (soft=180s, hard=300s)")
@@ -2448,7 +2450,7 @@ def cmd_em(
                 child_success += 1
             else:
                 child_fail += 1
-            child_lines.append(f"    {child_name} ({child_id}) → {', '.join(line_parts)}")
+            child_lines.append(f"    {child_name} ({child_id}) → {'; '.join(line_parts)}")
 
         results.append(f"  Children processed: {len(children)} ({child_success} succeeded, {child_fail} failed)")
         results.extend(child_lines)

@@ -1,10 +1,6 @@
 """Unit tests for sm#233: sm em one-shot EM pre-flight command."""
 
-import sys
-from io import StringIO
-from unittest.mock import MagicMock, call, patch
-
-import pytest
+from unittest.mock import MagicMock, call
 
 from src.cli.commands import cmd_em
 
@@ -202,5 +198,5 @@ def test_output_format_with_children(capsys):
     assert "Name set: em-session9 (a1b2c3d4)" in out
     assert "Context monitoring: enabled (notifications → self)" in out
     assert "Children processed: 2 (2 succeeded, 0 failed)" in out
-    assert "scout-1465 (b2c3d4e5) → context monitoring enabled, remind registered (soft=180s, hard=300s)" in out
-    assert "engineer-1465 (c3d4e5f6) → context monitoring enabled, remind registered (soft=180s, hard=300s)" in out
+    assert "scout-1465 (b2c3d4e5) → context monitoring enabled; remind registered (soft=180s, hard=300s)" in out
+    assert "engineer-1465 (c3d4e5f6) → context monitoring enabled; remind registered (soft=180s, hard=300s)" in out
