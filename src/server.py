@@ -296,6 +296,10 @@ def create_app(
     app.state.last_claude_output = {}  # Store last output per session from hooks
     app.state.pending_stop_notifications = set()  # Sessions where Stop hook had empty transcript
 
+    # Wire _app back-reference so _execute_handoff can clear server-side caches (#196)
+    if session_manager:
+        session_manager._app = app
+
     @app.get("/")
     async def root():
         """Health check endpoint."""

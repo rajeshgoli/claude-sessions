@@ -1232,6 +1232,13 @@ class MessageQueueManager:
                 state.stop_notify_sender_name = None
                 state.last_outgoing_sm_send_target = None
                 state.last_outgoing_sm_send_at = None
+                # Also clear server-side caches: stale last_claude_output or
+                # pending_stop_notifications can cause the new context's Stop hook
+                # to be misinterpreted (#196).
+                if hasattr(self.session_manager, '_app') and self.session_manager._app:
+                    _app = self.session_manager._app
+                    _app.state.last_claude_output.pop(session_id, None)
+                    _app.state.pending_stop_notifications.discard(session_id)
 
                 # 2. Send Escape to ensure idle
                 proc = await asyncio.create_subprocess_exec(
@@ -1257,7 +1264,9 @@ class MessageQueueManager:
                 )
                 await asyncio.wait_for(proc.communicate(), timeout=self.subprocess_timeout)
 
-                # 5. Wait for clear to complete
+                # 5. Wait for clear to complete — extended timeout (5.0s vs default 3.0s)
+                # because /clear rewrites the full terminal display and may take
+                # longer than a normal turn ending.
                 await self._wait_for_claude_prompt_async(tmux_session, timeout=5.0)
 
                 # 6. Send handoff prompt (with settle delay before Enter)

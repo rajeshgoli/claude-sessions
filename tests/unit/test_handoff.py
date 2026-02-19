@@ -276,23 +276,6 @@ class TestMarkSessionIdle:
         # _try_deliver_messages should NOT have been called directly
         mock_deliver.assert_not_called()
 
-    def test_skip_count_incremented(self, message_queue, handoff_doc):
-        """skip_count is incremented to absorb the /clear Stop hook."""
-        state = message_queue._get_or_create_state("abc12345")
-        state.pending_handoff_path = handoff_doc
-        initial_skip = state.stop_notify_skip_count
-
-        with patch("asyncio.create_task") as mock_create_task:
-            def noop(coro):
-                coro.close()
-                return MagicMock()
-            mock_create_task.side_effect = noop
-
-            # Simulate the _execute_handoff path inline by checking that
-            # skip_count is incremented during execution
-            # We test this indirectly via the _execute_handoff method below
-
-
 # ---------------------------------------------------------------------------
 # Test 4: Failure recovery — _execute_handoff restores idle on error
 # ---------------------------------------------------------------------------
