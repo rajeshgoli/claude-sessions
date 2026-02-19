@@ -106,6 +106,7 @@ class SendInputRequest(BaseModel):
     notify_on_stop: bool = False  # Notify sender when receiver's Stop hook fires
     remind_soft_threshold: Optional[int] = None  # Seconds for soft remind after delivery (#188)
     remind_hard_threshold: Optional[int] = None  # Seconds for hard remind after delivery (#188)
+    parent_session_id: Optional[str] = None  # EM session to wake periodically after delivery (#225-C)
 
 
 class PeriodicRemindRequest(BaseModel):
@@ -1017,6 +1018,7 @@ def create_app(
             notify_on_stop=request.notify_on_stop,
             remind_soft_threshold=request.remind_soft_threshold,
             remind_hard_threshold=request.remind_hard_threshold,
+            parent_session_id=request.parent_session_id,
         )
 
         if result == DeliveryResult.FAILED:
@@ -1080,10 +1082,11 @@ def create_app(
         # doesn't leak into stop-hook notifications for the next task (#167)
         _invalidate_session_cache(app, session_id)
 
-        # Cancel periodic remind (context reset means task is over) (#188)
+        # Cancel periodic remind and parent wake (context reset means task is over) (#188, #225-C)
         queue_mgr = app.state.session_manager.message_queue_manager
         if queue_mgr:
             queue_mgr.cancel_remind(session_id)
+            queue_mgr.cancel_parent_wake(session_id)
 
         return {"status": "cleared", "session_id": session_id}
 
@@ -1116,10 +1119,11 @@ def create_app(
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        # Cancel periodic remind before killing (#188)
+        # Cancel periodic remind and parent wake before killing (#188, #225-C)
         queue_mgr = app.state.session_manager.message_queue_manager
         if queue_mgr:
             queue_mgr.cancel_remind(session_id)
+            queue_mgr.cancel_parent_wake(session_id)
 
         # Kill tmux session
         success = app.state.session_manager.kill_session(session_id)
@@ -2075,10 +2079,11 @@ Or continue working if not done yet."""
             if target_session.parent_session_id != request.requester_session_id:
                 return {"error": f"Cannot kill session {target_session_id} - not your child session"}
 
-        # Cancel periodic remind before killing (#188)
+        # Cancel periodic remind and parent wake before killing (#188, #225-C)
         queue_mgr = app.state.session_manager.message_queue_manager
         if queue_mgr:
             queue_mgr.cancel_remind(target_session_id)
+            queue_mgr.cancel_parent_wake(target_session_id)
 
         # Kill the session
         success = app.state.session_manager.kill_session(target_session_id)

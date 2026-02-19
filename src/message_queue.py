@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, List, Callable, Awaitable, Tuple
 
-from .models import QueuedMessage, SessionDeliveryState, SessionStatus, RemindRegistration
+from .models import QueuedMessage, SessionDeliveryState, SessionStatus, RemindRegistration, ParentWakeRegistration
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,10 @@ class MessageQueueManager:
         self._remind_registrations: Dict[str, RemindRegistration] = {}
         self._remind_tasks: Dict[str, asyncio.Task] = {}  # target_session_id -> task
 
+        # Parent wake-up registrations (#225-C): keyed by child_session_id
+        self._parent_wake_registrations: Dict[str, ParentWakeRegistration] = {}
+        self._parent_wake_tasks: Dict[str, asyncio.Task] = {}  # child_session_id -> task
+
         # Recent stop notifications for suppressing redundant sm wait idle (#216)
         # Key: (recipient_session_id, sender_session_id) — (target, watcher)
         # Value: datetime when stop notification was sent
@@ -161,6 +165,9 @@ class MessageQueueManager:
         if "remind_hard_threshold" not in columns:
             cursor.execute("ALTER TABLE message_queue ADD COLUMN remind_hard_threshold INTEGER")
             logger.info("Migrated message_queue: added remind_hard_threshold column")
+        if "parent_session_id" not in columns:
+            cursor.execute("ALTER TABLE message_queue ADD COLUMN parent_session_id TEXT")
+            logger.info("Migrated message_queue: added parent_session_id column")
 
         # Remind registrations table (#188)
         cursor.execute("""
@@ -172,6 +179,21 @@ class MessageQueueManager:
                 registered_at TIMESTAMP NOT NULL,
                 last_reset_at TIMESTAMP NOT NULL,
                 soft_fired INTEGER DEFAULT 0,
+                is_active INTEGER DEFAULT 1
+            )
+        """)
+
+        # Parent wake-up registrations table (#225-C)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS parent_wake_registrations (
+                id TEXT PRIMARY KEY,
+                child_session_id TEXT NOT NULL UNIQUE,
+                parent_session_id TEXT NOT NULL,
+                period_seconds INTEGER NOT NULL,
+                registered_at TIMESTAMP NOT NULL,
+                last_wake_at TIMESTAMP,
+                last_status_at_prev_wake TIMESTAMP,
+                escalated INTEGER DEFAULT 0,
                 is_active INTEGER DEFAULT 1
             )
         """)
@@ -246,6 +268,8 @@ class MessageQueueManager:
         await self._recover_scheduled_reminders()
         # Recover active periodic remind registrations (#188)
         await self._recover_remind_registrations()
+        # Recover active parent wake registrations (#225-C)
+        await self._recover_parent_wake_registrations()
         # Recover pending messages - trigger delivery for sessions with queued messages
         await self._recover_pending_messages()
         logger.info("Message queue manager started")
@@ -320,9 +344,10 @@ class MessageQueueManager:
         state = self._get_or_create_state(session_id)
         logger.info(f"Session {session_id} marked idle")
 
-        # Cancel periodic remind on stop hook — agent completed their task (#188)
+        # Cancel periodic remind and parent wake on stop hook — agent completed their task (#188, #225-C)
         if from_stop_hook:
             self.cancel_remind(session_id)
+            self.cancel_parent_wake(session_id)
 
         # Check for pending handoff — takes priority over all other Stop hook logic (#196).
         # Only execute on Stop hook calls; other callers (queue_message, recovery) must not trigger it.
@@ -487,6 +512,7 @@ class MessageQueueManager:
         notify_on_stop: bool = False,
         remind_soft_threshold: Optional[int] = None,
         remind_hard_threshold: Optional[int] = None,
+        parent_session_id: Optional[str] = None,
     ) -> QueuedMessage:
         """
         Queue a message for delivery.
@@ -503,6 +529,7 @@ class MessageQueueManager:
             notify_on_stop: Notify sender when receiver's Stop hook fires
             remind_soft_threshold: Seconds after delivery before soft remind fires (#188)
             remind_hard_threshold: Seconds after delivery before hard remind fires (#188)
+            parent_session_id: EM session to wake periodically after delivery (#225-C)
 
         Returns:
             QueuedMessage with assigned ID
@@ -520,6 +547,7 @@ class MessageQueueManager:
             notify_on_stop=notify_on_stop,
             remind_soft_threshold=remind_soft_threshold,
             remind_hard_threshold=remind_hard_threshold,
+            parent_session_id=parent_session_id,
         )
 
         # Persist to database
@@ -527,8 +555,8 @@ class MessageQueueManager:
             INSERT INTO message_queue
             (id, target_session_id, sender_session_id, sender_name, text,
              delivery_mode, queued_at, timeout_at, notify_on_delivery, notify_after_seconds,
-             notify_on_stop, remind_soft_threshold, remind_hard_threshold)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             notify_on_stop, remind_soft_threshold, remind_hard_threshold, parent_session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             msg.id,
             msg.target_session_id,
@@ -543,6 +571,7 @@ class MessageQueueManager:
             1 if msg.notify_on_stop else 0,
             msg.remind_soft_threshold,
             msg.remind_hard_threshold,
+            msg.parent_session_id,
         ))
 
         queue_len = self.get_queue_length(target_session_id)
@@ -586,7 +615,7 @@ class MessageQueueManager:
             SELECT id, target_session_id, sender_session_id, sender_name, text,
                    delivery_mode, queued_at, timeout_at, notify_on_delivery,
                    notify_after_seconds, notify_on_stop, delivered_at,
-                   remind_soft_threshold, remind_hard_threshold
+                   remind_soft_threshold, remind_hard_threshold, parent_session_id
             FROM message_queue
             WHERE target_session_id = ? AND delivered_at IS NULL
             ORDER BY queued_at ASC
@@ -609,6 +638,7 @@ class MessageQueueManager:
                 delivered_at=datetime.fromisoformat(row[11]) if row[11] else None,
                 remind_soft_threshold=row[12],
                 remind_hard_threshold=row[13],
+                parent_session_id=row[14] if len(row) > 14 else None,
             )
             # Skip expired messages
             if msg.timeout_at and datetime.now() > msg.timeout_at:
@@ -923,6 +953,10 @@ class MessageQueueManager:
                             hard_threshold=msg.remind_hard_threshold or (msg.remind_soft_threshold + self.remind_hard_gap_seconds),
                         )
 
+                    # Start parent wake-up if requested (#225-C)
+                    if msg.parent_session_id and msg.remind_soft_threshold is not None:
+                        self.register_parent_wake(msg.target_session_id, msg.parent_session_id)
+
                 # Update session activity
                 session.last_activity = datetime.now()
                 from .models import SessionStatus
@@ -968,6 +1002,10 @@ class MessageQueueManager:
                             soft_threshold=msg.remind_soft_threshold,
                             hard_threshold=msg.remind_hard_threshold or (msg.remind_soft_threshold + self.remind_hard_gap_seconds),
                         )
+
+                    # Start parent wake-up if requested (#225-C)
+                    if msg.parent_session_id and msg.remind_soft_threshold is not None:
+                        self.register_parent_wake(msg.target_session_id, msg.parent_session_id)
                 else:
                     logger.error(f"Failed to deliver urgent message to {session_id} (codex-app)")
                 return
@@ -1029,6 +1067,10 @@ class MessageQueueManager:
                             soft_threshold=msg.remind_soft_threshold,
                             hard_threshold=msg.remind_hard_threshold or (msg.remind_soft_threshold + self.remind_hard_gap_seconds),
                         )
+
+                    # Start parent wake-up if requested (#225-C)
+                    if msg.parent_session_id and msg.remind_soft_threshold is not None:
+                        self.register_parent_wake(msg.target_session_id, msg.parent_session_id)
                 else:
                     logger.error(f"Failed to deliver urgent message to {session_id}")
 
@@ -1449,6 +1491,314 @@ class MessageQueueManager:
             logger.info(
                 f"Recovered remind registration {reg_id} for {target_session_id}, "
                 f"elapsed={elapsed:.0f}s (soft={soft}s, hard={hard}s)"
+            )
+
+    # =========================================================================
+    # Parent Wake-Up Registration (#225-C)
+    # =========================================================================
+
+    _PARENT_WAKE_DEFAULT_PERIOD = 600   # 10 min
+    _PARENT_WAKE_ESCALATED_PERIOD = 300  # 5 min after no-progress
+    _PARENT_WAKE_CHECK_INTERVAL = 10    # seconds between loop ticks
+
+    def register_parent_wake(
+        self,
+        child_session_id: str,
+        parent_session_id: str,
+        period_seconds: int = _PARENT_WAKE_DEFAULT_PERIOD,
+    ) -> str:
+        """Register (or replace) a parent wake-up registration for a dispatched child.
+
+        One-active-per-child. If a registration already exists it is cancelled and replaced.
+
+        Args:
+            child_session_id: Child session that was dispatched
+            parent_session_id: Parent (EM) session to receive periodic digests
+            period_seconds: Seconds between wake-ups (default 600)
+
+        Returns:
+            Registration ID
+        """
+        self.cancel_parent_wake(child_session_id)
+
+        reg_id = uuid.uuid4().hex[:12]
+        now = datetime.now()
+        reg = ParentWakeRegistration(
+            id=reg_id,
+            child_session_id=child_session_id,
+            parent_session_id=parent_session_id,
+            period_seconds=period_seconds,
+            registered_at=now,
+            last_wake_at=None,
+            last_status_at_prev_wake=None,
+            escalated=False,
+            is_active=True,
+        )
+        self._parent_wake_registrations[child_session_id] = reg
+
+        self._execute("""
+            INSERT OR REPLACE INTO parent_wake_registrations
+            (id, child_session_id, parent_session_id, period_seconds, registered_at,
+             last_wake_at, last_status_at_prev_wake, escalated, is_active)
+            VALUES (?, ?, ?, ?, ?, NULL, NULL, 0, 1)
+        """, (reg_id, child_session_id, parent_session_id, period_seconds, now.isoformat()))
+
+        task = asyncio.create_task(self._run_parent_wake_task(child_session_id))
+        self._parent_wake_tasks[child_session_id] = task
+
+        logger.info(
+            f"Parent wake registered: child={child_session_id}, parent={parent_session_id}, "
+            f"period={period_seconds}s, id={reg_id}"
+        )
+        return reg_id
+
+    def cancel_parent_wake(self, child_session_id: str):
+        """Cancel the parent wake registration for a child session.
+
+        Called on: stop hook, sm clear, sm kill.
+        """
+        reg = self._parent_wake_registrations.pop(child_session_id, None)
+        if reg:
+            reg.is_active = False
+            self._execute(
+                "UPDATE parent_wake_registrations SET is_active = 0 WHERE child_session_id = ?",
+                (child_session_id,)
+            )
+            logger.info(f"Parent wake cancelled for child={child_session_id}")
+
+        task = self._parent_wake_tasks.pop(child_session_id, None)
+        if task:
+            task.cancel()
+
+    def _update_parent_wake_db(self, child_session_id: str, **kwargs):
+        """Update parent wake registration fields in the DB."""
+        if not kwargs:
+            return
+        parts = []
+        values = []
+        for key, value in kwargs.items():
+            parts.append(f"{key} = ?")
+            if isinstance(value, datetime):
+                values.append(value.isoformat())
+            elif isinstance(value, bool):
+                values.append(1 if value else 0)
+            else:
+                values.append(value)
+        values.append(child_session_id)
+        self._execute(
+            f"UPDATE parent_wake_registrations SET {', '.join(parts)} WHERE child_session_id = ?",
+            tuple(values)
+        )
+
+    async def _run_parent_wake_task(self, child_session_id: str):
+        """Async loop that sends periodic digest messages to the parent EM."""
+        try:
+            while True:
+                reg = self._parent_wake_registrations.get(child_session_id)
+                if not reg or not reg.is_active:
+                    return
+
+                await asyncio.sleep(reg.period_seconds)
+
+                # Re-check after sleep — may have been cancelled
+                reg = self._parent_wake_registrations.get(child_session_id)
+                if not reg or not reg.is_active:
+                    return
+
+                # Assemble and queue digest
+                digest = await self._assemble_parent_wake_digest(child_session_id, reg)
+                self.queue_message(
+                    target_session_id=reg.parent_session_id,
+                    text=digest,
+                    delivery_mode="important",
+                )
+                logger.info(
+                    f"Parent wake digest queued: child={child_session_id}, parent={reg.parent_session_id}"
+                )
+
+                # Escalation check: if child's status timestamp hasn't changed since last wake
+                now = datetime.now()
+                child_session = self.session_manager.get_session(child_session_id)
+                current_status_at = getattr(child_session, "agent_status_at", None) if child_session else None
+
+                if (
+                    reg.last_wake_at is not None  # not the first wake
+                    and not reg.escalated
+                    and reg.last_status_at_prev_wake is not None
+                    and current_status_at == reg.last_status_at_prev_wake
+                ):
+                    reg.escalated = True
+                    reg.period_seconds = self._PARENT_WAKE_ESCALATED_PERIOD
+                    self._update_parent_wake_db(
+                        child_session_id,
+                        escalated=True,
+                        period_seconds=self._PARENT_WAKE_ESCALATED_PERIOD,
+                    )
+                    logger.info(
+                        f"Parent wake escalated for child={child_session_id}: "
+                        f"period reduced to {self._PARENT_WAKE_ESCALATED_PERIOD}s"
+                    )
+
+                # Update tracking fields
+                reg.last_wake_at = now
+                reg.last_status_at_prev_wake = current_status_at
+                self._update_parent_wake_db(
+                    child_session_id,
+                    last_wake_at=now,
+                    last_status_at_prev_wake=current_status_at,
+                )
+
+        except asyncio.CancelledError:
+            logger.info(f"Parent wake task cancelled for child={child_session_id}")
+        finally:
+            self._parent_wake_tasks.pop(child_session_id, None)
+
+    async def _assemble_parent_wake_digest(
+        self, child_session_id: str, reg: "ParentWakeRegistration"
+    ) -> str:
+        """Build the parent wake digest message.
+
+        Includes: duration, child status text with age, last 5 tool events,
+        and a no-progress flag if child hasn't called sm status since last wake.
+        """
+        child_session = self.session_manager.get_session(child_session_id)
+
+        child_name = "<unknown>"
+        child_id_short = child_session_id[:8]
+        status_text = None
+        status_age_str = ""
+        no_progress = False
+
+        if child_session:
+            child_name = child_session.friendly_name or child_session.name or child_session_id
+            child_id_short = child_session_id[:8]
+
+            # Status text and age
+            if child_session.agent_status_text:
+                status_text = child_session.agent_status_text
+                if child_session.agent_status_at:
+                    age_secs = (datetime.now() - child_session.agent_status_at).total_seconds()
+                    status_age_str = f" ({int(age_secs / 60)}m ago)"
+
+            # No-progress check: status_at hasn't changed since last wake
+            if (
+                reg.last_wake_at is not None
+                and reg.last_status_at_prev_wake is not None
+                and child_session.agent_status_at == reg.last_status_at_prev_wake
+            ):
+                no_progress = True
+
+        # Duration
+        elapsed_secs = (datetime.now() - reg.registered_at).total_seconds()
+        elapsed_min = int(elapsed_secs / 60)
+
+        # Header
+        if no_progress:
+            header = f"[sm dispatch] Child update: {child_name} ({child_id_short}) — NO PROGRESS DETECTED"
+        else:
+            header = f"[sm dispatch] Child update: {child_name} ({child_id_short})"
+
+        lines = [header, f"Duration: {elapsed_min}m running"]
+
+        if status_text:
+            lines.append(f"Status: \"{status_text}\"{status_age_str}")
+        else:
+            lines.append("Status: (no status reported)")
+
+        if no_progress:
+            lines.append(
+                f"Warning: No status update since last wake-up. Hard remind was sent at {reg.last_status_at_prev_wake}."
+            )
+
+        # Recent activity from tool_usage.db
+        tool_events = await asyncio.to_thread(self._read_child_tail, child_session_id, 5)
+        if tool_events:
+            lines.append("")
+            lines.append("Recent activity:")
+            now = datetime.now()
+            for event in tool_events:
+                tool = event.get("tool_name", "?")
+                ts_str = event.get("timestamp", "")
+                try:
+                    ts = datetime.fromisoformat(ts_str.replace(" ", "T")) if ts_str else None
+                    age = f" ({int((now - ts).total_seconds() / 60)}m ago)" if ts else ""
+                except Exception:
+                    age = ""
+                target = event.get("target_file") or event.get("bash_command") or ""
+                if target:
+                    target = target[:60]
+                    lines.append(f"  {tool}: {target}{age}")
+                else:
+                    lines.append(f"  {tool}{age}")
+        elif child_session:
+            lines.append("")
+            lines.append("Recent activity: (no tool events recorded)")
+
+        return "\n".join(lines)
+
+    def _read_child_tail(self, child_session_id: str, n: int = 5) -> list:
+        """Read the last N PreToolUse events from tool_usage.db for a child session.
+
+        Returns a list of dicts with keys: tool_name, target_file, bash_command, timestamp.
+        Returns empty list if DB not available.
+        """
+        db_path = Path("~/.local/share/claude-sessions/tool_usage.db").expanduser()
+        if not db_path.exists():
+            return []
+
+        try:
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT tool_name, target_file, bash_command, timestamp
+                FROM tool_usage
+                WHERE session_id = ? AND hook_type = 'PreToolUse'
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (child_session_id, n))
+            rows = cursor.fetchall()
+            conn.close()
+            # Return in chronological order (oldest first)
+            return [
+                {"tool_name": r[0], "target_file": r[1], "bash_command": r[2], "timestamp": r[3]}
+                for r in reversed(rows)
+            ]
+        except Exception as e:
+            logger.warning(f"Could not read tool_usage.db for {child_session_id}: {e}")
+            return []
+
+    async def _recover_parent_wake_registrations(self):
+        """Recover active parent wake registrations on server restart."""
+        rows = self._execute_query("""
+            SELECT id, child_session_id, parent_session_id, period_seconds,
+                   registered_at, last_wake_at, last_status_at_prev_wake, escalated
+            FROM parent_wake_registrations
+            WHERE is_active = 1
+        """)
+
+        for row in rows:
+            (reg_id, child_session_id, parent_session_id, period_seconds,
+             registered_at_str, last_wake_at_str, last_status_at_str, escalated) = row
+
+            reg = ParentWakeRegistration(
+                id=reg_id,
+                child_session_id=child_session_id,
+                parent_session_id=parent_session_id,
+                period_seconds=period_seconds,
+                registered_at=datetime.fromisoformat(registered_at_str),
+                last_wake_at=datetime.fromisoformat(last_wake_at_str) if last_wake_at_str else None,
+                last_status_at_prev_wake=datetime.fromisoformat(last_status_at_str) if last_status_at_str else None,
+                escalated=bool(escalated),
+                is_active=True,
+            )
+            self._parent_wake_registrations[child_session_id] = reg
+
+            task = asyncio.create_task(self._run_parent_wake_task(child_session_id))
+            self._parent_wake_tasks[child_session_id] = task
+
+            logger.info(
+                f"Recovered parent wake registration {reg_id}: child={child_session_id}, "
+                f"parent={parent_session_id}, period={period_seconds}s"
             )
 
     # =========================================================================
