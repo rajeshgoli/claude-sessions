@@ -397,6 +397,7 @@ class QueuedMessage:
     delivered_at: Optional[datetime] = None  # None = pending
     remind_soft_threshold: Optional[int] = None  # Seconds for soft remind after delivery (#188)
     remind_hard_threshold: Optional[int] = None  # Seconds for hard remind after delivery (#188)
+    parent_session_id: Optional[str] = None  # EM to wake periodically after delivery (#225-C)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -415,6 +416,7 @@ class QueuedMessage:
             "delivered_at": self.delivered_at.isoformat() if self.delivered_at else None,
             "remind_soft_threshold": self.remind_soft_threshold,
             "remind_hard_threshold": self.remind_hard_threshold,
+            "parent_session_id": self.parent_session_id,
         }
 
 
@@ -428,6 +430,24 @@ class RemindRegistration:
     registered_at: datetime
     last_reset_at: datetime  # updated by sm status; initialized on delivery
     soft_fired: bool = False
+    is_active: bool = True
+
+
+@dataclass
+class ParentWakeRegistration:
+    """Registration for periodic parent EM wake-up digest (#225-C).
+
+    When sm dispatch sends a message to a child, the EM (parent) is registered
+    to receive periodic digest messages about the child's progress.
+    """
+    id: str
+    child_session_id: str
+    parent_session_id: str
+    period_seconds: int           # 600 normally, 300 after escalation
+    registered_at: datetime
+    last_wake_at: Optional[datetime]           # None before first wake
+    last_status_at_prev_wake: Optional[datetime]  # agent_status_at at last wake
+    escalated: bool = False
     is_active: bool = True
 
 

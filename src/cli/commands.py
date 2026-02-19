@@ -777,7 +777,7 @@ def cmd_dispatch(
         print(expanded)
         return 0
 
-    # Auto-arm periodic remind on every dispatch (#225-A).
+    # Auto-arm periodic remind and parent wake on every dispatch (#225-A, #225-C).
     soft_threshold, hard_threshold = get_auto_remind_config(os.getcwd())
 
     return cmd_send(
@@ -785,6 +785,7 @@ def cmd_dispatch(
         notify_on_stop=notify_on_stop,
         remind_soft_threshold=soft_threshold,
         remind_hard_threshold=hard_threshold,
+        parent_session_id=em_id,
     )
 
 
@@ -864,6 +865,7 @@ def cmd_send(
     notify_on_stop: bool = True,
     remind_soft_threshold: Optional[int] = None,
     remind_hard_threshold: Optional[int] = None,
+    parent_session_id: Optional[str] = None,
 ) -> int:
     """
     Send input text to a session.
@@ -880,6 +882,7 @@ def cmd_send(
         notify_on_stop: Notify sender when receiver's Stop hook fires (default True)
         remind_soft_threshold: Soft remind threshold in seconds; only set by sm dispatch (#225-A)
         remind_hard_threshold: Hard remind threshold in seconds; only set by sm dispatch (#225-A)
+        parent_session_id: EM session to receive periodic wake digests; only set by sm dispatch (#225-C)
 
     Exit codes:
         0: Success
@@ -917,6 +920,7 @@ def cmd_send(
         notify_on_stop=notify_on_stop,
         remind_soft_threshold=remind_soft_threshold,
         remind_hard_threshold=remind_hard_threshold,
+        parent_session_id=parent_session_id,
     )
 
     if unavailable:

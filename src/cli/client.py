@@ -163,6 +163,7 @@ class SessionManagerClient:
         notify_on_stop: bool = False,
         remind_soft_threshold: Optional[int] = None,
         remind_hard_threshold: Optional[int] = None,
+        parent_session_id: Optional[str] = None,
     ) -> tuple[bool, bool]:
         """
         Send text input to a session.
@@ -196,6 +197,8 @@ class SessionManagerClient:
             payload["remind_soft_threshold"] = remind_soft_threshold
         if remind_hard_threshold is not None:
             payload["remind_hard_threshold"] = remind_hard_threshold
+        if parent_session_id is not None:
+            payload["parent_session_id"] = parent_session_id
 
         data, success, unavailable = self._request(
             "POST",

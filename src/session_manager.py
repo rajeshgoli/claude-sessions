@@ -596,6 +596,7 @@ class SessionManager:
         bypass_queue: bool = False,
         remind_soft_threshold: Optional[int] = None,
         remind_hard_threshold: Optional[int] = None,
+        parent_session_id: Optional[str] = None,
     ) -> DeliveryResult:
         """
         Send input to a session with optional sender metadata and delivery mode.
@@ -682,6 +683,7 @@ class SessionManager:
                     notify_on_stop=notify_on_stop,
                     remind_soft_threshold=remind_soft_threshold,
                     remind_hard_threshold=remind_hard_threshold,
+                    parent_session_id=parent_session_id,
                 )
                 # Record outgoing sm send for deferred stop notification suppression (#182)
                 # Placed after queue_message to ensure message was persisted first.
@@ -706,6 +708,7 @@ class SessionManager:
                     notify_on_stop=notify_on_stop,
                     remind_soft_threshold=remind_soft_threshold,
                     remind_hard_threshold=remind_hard_threshold,
+                    parent_session_id=parent_session_id,
                 )
                 # Record outgoing sm send for deferred stop notification suppression (#182)
                 if from_sm_send and sender_session_id:
