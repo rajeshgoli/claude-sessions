@@ -164,7 +164,6 @@ class MessageQueueManager:
                 registered_at TIMESTAMP NOT NULL,
                 last_reset_at TIMESTAMP NOT NULL,
                 soft_fired INTEGER DEFAULT 0,
-                hard_fired INTEGER DEFAULT 0,
                 is_active INTEGER DEFAULT 1
             )
         """)
@@ -1236,8 +1235,8 @@ class MessageQueueManager:
         self._execute("""
             INSERT OR REPLACE INTO remind_registrations
             (id, target_session_id, soft_threshold_seconds, hard_threshold_seconds,
-             registered_at, last_reset_at, soft_fired, hard_fired, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, 0, 0, 1)
+             registered_at, last_reset_at, soft_fired, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, 0, 1)
         """, (
             reg_id,
             target_session_id,
@@ -1261,7 +1260,7 @@ class MessageQueueManager:
         """
         Reset the remind timer for a session (called when agent reports sm status).
 
-        Updates last_reset_at and clears soft_fired/hard_fired so the cycle restarts.
+        Updates last_reset_at and clears soft_fired so the cycle restarts.
         """
         reg = self._remind_registrations.get(target_session_id)
         if not reg or not reg.is_active:
@@ -1270,9 +1269,8 @@ class MessageQueueManager:
         now = datetime.now()
         reg.last_reset_at = now
         reg.soft_fired = False
-        reg.hard_fired = False
 
-        self._update_remind_db(target_session_id, last_reset_at=now, soft_fired=False, hard_fired=False)
+        self._update_remind_db(target_session_id, last_reset_at=now, soft_fired=False)
         logger.info(f"Remind timer reset for {target_session_id}")
 
     def cancel_remind(self, target_session_id: str):
@@ -1348,22 +1346,20 @@ class MessageQueueManager:
                     self._update_remind_db(target_session_id, soft_fired=True)
 
                 # Hard threshold: fire urgent remind and reset cycle
-                if not reg.hard_fired and elapsed >= reg.hard_threshold_seconds:
+                if elapsed >= reg.hard_threshold_seconds:
                     self.queue_message(
                         target_session_id=target_session_id,
                         text='[sm remind] Status overdue. Run: sm status "your current progress"',
                         delivery_mode="urgent",
                     )
-                    # Reset cycle — hard_fired is never persisted as True (cycle restarts)
+                    # Reset cycle so it restarts
                     now = datetime.now()
                     reg.last_reset_at = now
                     reg.soft_fired = False
-                    reg.hard_fired = False
                     self._update_remind_db(
                         target_session_id,
                         last_reset_at=now,
                         soft_fired=False,
-                        hard_fired=False,
                     )
 
         except asyncio.CancelledError:
@@ -1375,13 +1371,13 @@ class MessageQueueManager:
         """Recover active remind registrations on server restart."""
         rows = self._execute_query("""
             SELECT id, target_session_id, soft_threshold_seconds, hard_threshold_seconds,
-                   registered_at, last_reset_at, soft_fired, hard_fired
+                   registered_at, last_reset_at, soft_fired
             FROM remind_registrations
             WHERE is_active = 1
         """)
 
         for row in rows:
-            reg_id, target_session_id, soft, hard, registered_at_str, last_reset_at_str, soft_fired, hard_fired = row
+            reg_id, target_session_id, soft, hard, registered_at_str, last_reset_at_str, soft_fired = row
             last_reset_at = datetime.fromisoformat(last_reset_at_str)
 
             reg = RemindRegistration(
@@ -1392,7 +1388,6 @@ class MessageQueueManager:
                 registered_at=datetime.fromisoformat(registered_at_str),
                 last_reset_at=last_reset_at,
                 soft_fired=bool(soft_fired),
-                hard_fired=bool(hard_fired),
                 is_active=True,
             )
             self._remind_registrations[target_session_id] = reg

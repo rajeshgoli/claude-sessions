@@ -206,7 +206,7 @@ class TestBasicRemindLifecycle:
 
     @pytest.mark.asyncio
     async def test_hard_fire_resets_cycle(self, mq):
-        """After hard fires, last_reset_at updated and soft_fired/hard_fired cleared."""
+        """After hard fires, last_reset_at updated and soft_fired cleared."""
         with patch("asyncio.create_task", noop_create_task):
             mq.register_periodic_remind("target", soft_threshold=1, hard_threshold=2)
 
@@ -219,7 +219,6 @@ class TestBasicRemindLifecycle:
 
         # Cycle reset
         assert reg.soft_fired is False
-        assert reg.hard_fired is False
         assert reg.last_reset_at > old_reset
 
 
@@ -244,7 +243,6 @@ class TestStatusReset:
 
         assert reg.last_reset_at > old_reset
         assert reg.soft_fired is False
-        assert reg.hard_fired is False
 
     def test_reset_remind_persists_to_db(self, mq):
         """reset_remind updates DB row."""
@@ -562,7 +560,6 @@ class TestSmRemindDisambiguation:
             last_reset_at=datetime.now(),
         )
         assert reg.soft_fired is False
-        assert reg.hard_fired is False
         assert reg.is_active is True
 
     def test_queued_message_has_remind_fields(self):
@@ -632,8 +629,8 @@ class TestCrashRecovery:
         mq._execute("""
             INSERT INTO remind_registrations
             (id, target_session_id, soft_threshold_seconds, hard_threshold_seconds,
-             registered_at, last_reset_at, soft_fired, hard_fired, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0)
+             registered_at, last_reset_at, soft_fired, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, 0, 0)
         """, ("dead123", "agent11", 30, 60, now, now))
 
         with patch("asyncio.create_task", noop_create_task):
@@ -675,8 +672,8 @@ class TestCrashRecovery:
         mq._execute("""
             INSERT INTO remind_registrations
             (id, target_session_id, soft_threshold_seconds, hard_threshold_seconds,
-             registered_at, last_reset_at, soft_fired, hard_fired, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, 0, 0, 1)
+             registered_at, last_reset_at, soft_fired, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, 0, 1)
         """, ("rec123", "agent12", 30, 60, now_str, old_time))
 
         with patch("asyncio.create_task", noop_create_task):

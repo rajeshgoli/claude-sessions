@@ -428,7 +428,6 @@ class RemindRegistration:
     registered_at: datetime
     last_reset_at: datetime  # updated by sm status; initialized on delivery
     soft_fired: bool = False
-    hard_fired: bool = False
     is_active: bool = True
 
 
