@@ -28,6 +28,8 @@ class MessageQueueManager:
     - Delivery modes: sequential, important, urgent
     """
 
+    _STOP_SUPPRESS_WINDOW_SECONDS = 10
+
     def __init__(
         self,
         session_manager,
@@ -1705,16 +1707,18 @@ class MessageQueueManager:
 
                 if is_idle:
                     # Suppress if stop notification was already sent to this watcher <10s ago (#216)
-                    STOP_SUPPRESS_WINDOW = 10
                     stop_key = (target_session_id, watcher_session_id)
                     stop_at = self._recent_stop_notifications.get(stop_key)
-                    if stop_at and (datetime.now() - stop_at).total_seconds() < STOP_SUPPRESS_WINDOW:
+                    if stop_at and (datetime.now() - stop_at).total_seconds() < self._STOP_SUPPRESS_WINDOW_SECONDS:
                         logger.info(
                             f"Watch {watch_id}: suppressing idle — stop notification already sent "
                             f"to {watcher_session_id} {(datetime.now() - stop_at).total_seconds():.1f}s ago (#216)"
                         )
                         self._recent_stop_notifications.pop(stop_key, None)
                         return
+                    elif stop_at:
+                        # Window expired — pop stale entry before proceeding
+                        self._recent_stop_notifications.pop(stop_key, None)
 
                     # Target is idle - notify watcher
                     target_session = self.session_manager.get_session(target_session_id)
