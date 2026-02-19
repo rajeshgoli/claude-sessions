@@ -18,7 +18,7 @@ def _handle_dispatch(session_id: Optional[str]) -> int:
     """
     from .dispatch import parse_dispatch_args
 
-    agent_id, role, dry_run, delivery_mode, notify_on_stop, dynamic_params = \
+    agent_id, role, dry_run, no_clear, delivery_mode, notify_on_stop, dynamic_params = \
         parse_dispatch_args(sys.argv[2:])
 
     # em_id check: required for send mode, placeholder for dry-run
@@ -34,8 +34,8 @@ def _handle_dispatch(session_id: Optional[str]) -> int:
     client = SessionManagerClient()
     return commands.cmd_dispatch(
         client, agent_id, role, dynamic_params, em_id,
-        dry_run=dry_run, delivery_mode=delivery_mode,
-        notify_on_stop=notify_on_stop,
+        dry_run=dry_run, no_clear=no_clear,
+        delivery_mode=delivery_mode, notify_on_stop=notify_on_stop,
     )
 
 

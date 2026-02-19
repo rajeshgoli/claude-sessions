@@ -261,7 +261,7 @@ def parse_dispatch_args(argv: list[str]) -> tuple:
         argv: sys.argv[2:] (everything after 'dispatch')
 
     Returns:
-        Tuple of (agent_id, role, dry_run, delivery_mode, notify_on_stop, dynamic_params)
+        Tuple of (agent_id, role, dry_run, no_clear, delivery_mode, notify_on_stop, dynamic_params)
 
     Raises:
         SystemExit: On parse errors (via argparse).
@@ -283,6 +283,8 @@ def parse_dispatch_args(argv: list[str]) -> tuple:
     static_parser.add_argument("--important", action="store_true", help="Pass through to sm send --important")
     static_parser.add_argument("--steer", action="store_true", help="Pass through to sm send --steer")
     static_parser.add_argument("--no-notify-on-stop", action="store_true", help="Pass through to sm send --no-notify-on-stop")
+    static_parser.add_argument("--no-clear", action="store_true",
+        help="Skip clearing target session before dispatch (use for follow-up dispatches on same task)")
 
     known, remaining = static_parser.parse_known_args(argv)
 
@@ -318,6 +320,7 @@ def parse_dispatch_args(argv: list[str]) -> tuple:
         known.agent_id,
         known.role,
         known.dry_run,
+        known.no_clear,
         delivery_mode,
         notify_on_stop,
         dynamic_params,
