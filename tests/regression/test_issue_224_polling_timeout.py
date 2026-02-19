@@ -8,9 +8,10 @@ import pytest
 
 from src.telegram_bot import (
     _PollingTracker,
-    TrackingHTTPXRequest,
+    _TrackingHTTPXRequest,
     _POLLING_CHECK_INTERVAL,
     _POLLING_STALL_THRESHOLD,
+    _POLLING_READ_TIMEOUT,
     TelegramBot,
 )
 
@@ -35,7 +36,7 @@ class TestPollingTracker:
 
 
 class TestTrackingHTTPXRequest:
-    """TrackingHTTPXRequest records timestamp on getUpdates calls."""
+    """_TrackingHTTPXRequest records timestamp on getUpdates calls."""
 
     @pytest.mark.asyncio
     async def test_records_timestamp_on_get_updates(self):
@@ -43,7 +44,7 @@ class TestTrackingHTTPXRequest:
         # Age the tracker
         tracker._last_get_updates_ts = time.monotonic() - 60
 
-        req = TrackingHTTPXRequest(tracker=tracker, read_timeout=30.0)
+        req = _TrackingHTTPXRequest(tracker=tracker, read_timeout=_POLLING_READ_TIMEOUT)
 
         with patch.object(
             req.__class__.__bases__[0],
@@ -65,7 +66,7 @@ class TestTrackingHTTPXRequest:
         tracker = _PollingTracker()
         tracker._last_get_updates_ts = time.monotonic() - 60
 
-        req = TrackingHTTPXRequest(tracker=tracker, read_timeout=30.0)
+        req = _TrackingHTTPXRequest(tracker=tracker, read_timeout=_POLLING_READ_TIMEOUT)
 
         with patch.object(
             req.__class__.__bases__[0],
@@ -155,6 +156,111 @@ class TestPollingHealthMonitor:
         assert bot._polling_tracker.elapsed() < 2.0
 
 
+class TestPollingHealthMonitorRestartFailure:
+    """Health monitor handles restart errors gracefully."""
+
+    @pytest.mark.asyncio
+    async def test_loop_continues_after_stop_failure(self):
+        """Exception during updater.stop() is logged; monitor keeps running."""
+        bot = TelegramBot(token="test-token")
+        bot._polling_check_interval = 0
+
+        mock_updater = AsyncMock()
+        mock_updater.stop.side_effect = RuntimeError("network error")
+        mock_application = MagicMock()
+        mock_application.updater = mock_updater
+        bot.application = mock_application
+
+        # Age tracker past stall threshold
+        bot._polling_tracker._last_get_updates_ts = (
+            time.monotonic() - _POLLING_STALL_THRESHOLD - 10
+        )
+
+        task = asyncio.create_task(bot._polling_health_monitor())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        # Task must still be running (not raised or cancelled)
+        assert not task.done()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # stop() was called; start_polling() was NOT (exception aborted restart)
+        mock_updater.stop.assert_called_once()
+        mock_updater.start_polling.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_tracker_not_reset_when_stop_fails(self):
+        """If stop() raises, tracker.record() is never called — timestamp stays stale."""
+        bot = TelegramBot(token="test-token")
+        bot._polling_check_interval = 0
+
+        mock_updater = AsyncMock()
+        mock_updater.stop.side_effect = RuntimeError("network error")
+        mock_application = MagicMock()
+        mock_application.updater = mock_updater
+        bot.application = mock_application
+
+        stale_ts = time.monotonic() - _POLLING_STALL_THRESHOLD - 10
+        bot._polling_tracker._last_get_updates_ts = stale_ts
+
+        task = asyncio.create_task(bot._polling_health_monitor())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Tracker was NOT reset — elapsed should still be large
+        assert bot._polling_tracker.elapsed() >= _POLLING_STALL_THRESHOLD
+
+
+class TestBotStopLifecycle:
+    """stop() cancels the health monitor task and clears the reference."""
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_health_monitor_task(self):
+        bot = TelegramBot(token="test-token")
+        bot._polling_check_interval = 3600  # won't fire during test
+
+        # Simulate a running health monitor task
+        bot._health_monitor_task = asyncio.create_task(
+            bot._polling_health_monitor()
+        )
+        task_ref = bot._health_monitor_task
+
+        mock_application = AsyncMock()
+        bot.application = mock_application
+
+        await bot.stop()
+
+        # Task must have been cancelled
+        assert task_ref.cancelled()
+        # Reference must be cleared
+        assert bot._health_monitor_task is None
+        # Application teardown must have been called
+        mock_application.updater.stop.assert_called_once()
+        mock_application.stop.assert_called_once()
+        mock_application.shutdown.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_without_task_does_not_raise(self):
+        """stop() is safe when no health monitor task was ever started."""
+        bot = TelegramBot(token="test-token")
+        assert bot._health_monitor_task is None
+
+        mock_application = AsyncMock()
+        bot.application = mock_application
+
+        # Should not raise
+        await bot.stop()
+        assert bot._health_monitor_task is None
+
+
 class TestBotInit:
     def test_tracker_and_task_initialized(self):
         bot = TelegramBot(token="test-token")
@@ -164,3 +270,5 @@ class TestBotInit:
     def test_constants_are_sane(self):
         assert _POLLING_CHECK_INTERVAL < _POLLING_STALL_THRESHOLD
         assert _POLLING_STALL_THRESHOLD < 120
+        # read_timeout + Telegram hold (10s) must be < stall threshold
+        assert _POLLING_READ_TIMEOUT + 10 < _POLLING_STALL_THRESHOLD

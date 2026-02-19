@@ -22,8 +22,17 @@ from .models import Session, UserInput, NotificationChannel, DeliveryResult
 logger = logging.getLogger(__name__)
 
 # Stall detection thresholds
-_POLLING_CHECK_INTERVAL = 30  # seconds between health checks
+_POLLING_CHECK_INTERVAL = 30   # seconds between health checks
 _POLLING_STALL_THRESHOLD = 45  # seconds without a getUpdates before restart
+
+# getUpdates HTTP timeouts — per-chunk (not total); effective httpx read timeout for
+# getUpdates = _POLLING_READ_TIMEOUT + Telegram long-poll hold (10s default) = 40s,
+# which is intentionally < _POLLING_STALL_THRESHOLD so httpx fires first on normal
+# TCP stalls; the health monitor catches keepalive-defeated stalls as backup.
+_POLLING_READ_TIMEOUT = 30.0
+_POLLING_CONNECT_TIMEOUT = 5.0
+_POLLING_WRITE_TIMEOUT = 5.0
+_POLLING_POOL_TIMEOUT = 5.0
 
 
 class _PollingTracker:
@@ -39,7 +48,7 @@ class _PollingTracker:
         return time.monotonic() - self._last_get_updates_ts
 
 
-class TrackingHTTPXRequest(HTTPXRequest):
+class _TrackingHTTPXRequest(HTTPXRequest):
     """HTTPXRequest subclass that records the timestamp of each getUpdates call."""
 
     def __init__(self, tracker: _PollingTracker, **kwargs) -> None:
@@ -1581,12 +1590,12 @@ Provide ONLY the summary, no preamble or questions."""
 
     async def start(self):
         """Start the bot."""
-        get_updates_request = TrackingHTTPXRequest(
+        get_updates_request = _TrackingHTTPXRequest(
             tracker=self._polling_tracker,
-            read_timeout=30.0,
-            connect_timeout=5.0,
-            write_timeout=5.0,
-            pool_timeout=5.0,
+            read_timeout=_POLLING_READ_TIMEOUT,
+            connect_timeout=_POLLING_CONNECT_TIMEOUT,
+            write_timeout=_POLLING_WRITE_TIMEOUT,
+            pool_timeout=_POLLING_POOL_TIMEOUT,
         )
         self.application = (
             Application.builder()
