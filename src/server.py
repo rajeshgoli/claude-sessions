@@ -1515,15 +1515,22 @@ Provide ONLY the summary, no preamble or questions."""
                 if not handoff_in_progress:
                     asyncio.create_task(queue_mgr._restore_user_input_after_response(session_manager_id))
 
-            # Keep session.status in sync with delivery_state.is_idle.
-            # Only set IDLE if message_queue also considers session idle (sm#232):
-            # when skip_count absorbed the Stop hook, state.is_idle was NOT set True,
-            # so session.status correctly remains RUNNING.
-            if app.state.session_manager:
-                target_session = app.state.session_manager.get_session(session_manager_id)
-                if target_session and target_session.status != SessionStatus.STOPPED:
-                    _mq_state = queue_mgr.delivery_states.get(session_manager_id) if queue_mgr else None
-                    if not _mq_state or _mq_state.is_idle:
+                # Keep session.status in sync with delivery_state.is_idle.
+                # Only set IDLE if message_queue also considers session idle (sm#232):
+                # when skip_count absorbed the Stop hook, state.is_idle was NOT set True,
+                # so session.status correctly remains RUNNING.
+                if app.state.session_manager:
+                    target_session = app.state.session_manager.get_session(session_manager_id)
+                    if target_session and target_session.status != SessionStatus.STOPPED:
+                        if not state or state.is_idle:
+                            app.state.session_manager.update_session_status(
+                                session_manager_id, SessionStatus.IDLE
+                            )
+            else:
+                # No queue_mgr — no delivery state; always update to IDLE
+                if app.state.session_manager:
+                    target_session = app.state.session_manager.get_session(session_manager_id)
+                    if target_session and target_session.status != SessionStatus.STOPPED:
                         app.state.session_manager.update_session_status(
                             session_manager_id, SessionStatus.IDLE
                         )

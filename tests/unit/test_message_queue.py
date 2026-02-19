@@ -1723,12 +1723,12 @@ class TestSkipFence232:
         assert state.is_idle is False
         assert state.stop_notify_skip_count == 0
 
-    def test_handoff_path_arms_both_fields(self, mock_session_manager, temp_db_path):
-        """_execute_handoff arms skip_count_armed_at; subsequent /clear Stop hook is absorbed."""
+    def test_absorption_when_handoff_fence_is_armed(self, mock_session_manager, temp_db_path):
+        """When skip fence is armed (as _execute_handoff does), /clear Stop hook is absorbed."""
         mq = self._make_mq(mock_session_manager, temp_db_path)
         state = mq._get_or_create_state("target232g")
         state.is_idle = False
-        # Simulate what _execute_handoff does
+        # Directly arm the fence (mirrors what _execute_handoff does)
         state.stop_notify_skip_count += 1
         state.skip_count_armed_at = datetime.now()
 
@@ -1739,6 +1739,37 @@ class TestSkipFence232:
         assert state.is_idle is False
         assert state.stop_notify_skip_count == 0
         assert state.skip_count_armed_at is None  # cleared on full consumption
+
+    @pytest.mark.asyncio
+    async def test_execute_handoff_arms_skip_fence(self, mock_session_manager, temp_db_path, tmp_path):
+        """_execute_handoff actually sets skip_count_armed_at before any tmux ops.
+
+        If the arming line in _execute_handoff were removed, this test would fail.
+        """
+        mq = self._make_mq(mock_session_manager, temp_db_path)
+
+        # Set up session in sessions dict (required by _execute_handoff)
+        session = MagicMock()
+        session.id = "target232g2"
+        session.tmux_session = "claude-target232g2"
+        session.provider = "claude"
+        mock_session_manager.sessions = {"target232g2": session}
+
+        # Real file required (Path.exists() check inside _execute_handoff)
+        handoff_file = tmp_path / "handoff.md"
+        handoff_file.write_text("handoff content")
+
+        state = mq._get_or_create_state("target232g2")
+        assert state.skip_count_armed_at is None  # pre-condition: not yet armed
+
+        # Fail at first subprocess call; _restore_idle does NOT clear skip_count_armed_at
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(side_effect=OSError("no tmux"))), \
+             patch("asyncio.create_task", noop_create_task):
+            await mq._execute_handoff("target232g2", str(handoff_file))
+
+        # Fence must be armed — arming happens before any subprocess ops
+        assert state.skip_count_armed_at is not None
+        assert state.stop_notify_skip_count == 1
 
     @pytest.mark.asyncio
     async def test_watch_no_false_idle_after_clear_dispatch(self, mock_session_manager, temp_db_path):
