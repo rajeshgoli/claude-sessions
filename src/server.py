@@ -2287,7 +2287,7 @@ Or continue working if not done yet."""
             # warning at 50% = 100K — overlap is possible).
             session._context_warning_sent = False
             session._context_critical_sent = False
-            # Notify via context_monitor_notify (#206 — replaces hardcoded parent_session_id)
+            # Notify via context_monitor_notify (#206)
             if session.context_monitor_notify and queue_mgr:
                 msg = (
                     f"[sm context] Compaction fired for {session.friendly_name or session_id}. "
