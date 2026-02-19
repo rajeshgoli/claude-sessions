@@ -3,8 +3,9 @@
 import os
 import sys
 from typing import Optional
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
 import json
 
 # Default API endpoint
@@ -316,7 +317,6 @@ class SessionManagerClient:
         Returns:
             Session dict or None if unavailable
         """
-        import urllib.parse
         encoded_dir = urllib.parse.quote(working_dir)
         query = f"working_dir={encoded_dir}"
         if provider:
@@ -592,7 +592,6 @@ class SessionManagerClient:
 
     def schedule_reminder(self, session_id: str, delay_seconds: int, message: str) -> Optional[dict]:
         """Schedule a one-shot self-reminder (calls POST /scheduler/remind)."""
-        import urllib.parse
         query = (
             f"session_id={urllib.parse.quote(session_id)}"
             f"&delay_seconds={delay_seconds}"

@@ -874,10 +874,9 @@ def cmd_send(
         2: Session manager unavailable
     """
     # Compute remind thresholds if requested (#188)
-    # hard = soft + DEFAULT_HARD_GAP (120s)
-    DEFAULT_HARD_GAP = 120
+    # hard_threshold is intentionally None — server computes it from config.remind.hard_gap_seconds
     remind_soft_threshold = remind_seconds
-    remind_hard_threshold = (remind_seconds + DEFAULT_HARD_GAP) if remind_seconds else None
+    remind_hard_threshold = None
 
     # Resolve identifier to session ID and get session details
     session_id, session = resolve_session_id(client, identifier)

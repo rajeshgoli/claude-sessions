@@ -6,6 +6,7 @@ import shlex
 import sqlite3
 import subprocess
 import threading
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, List, Callable, Awaitable
@@ -540,7 +541,8 @@ class MessageQueueManager:
         rows = self._execute_query("""
             SELECT id, target_session_id, sender_session_id, sender_name, text,
                    delivery_mode, queued_at, timeout_at, notify_on_delivery,
-                   notify_after_seconds, delivered_at, remind_soft_threshold, remind_hard_threshold
+                   notify_after_seconds, notify_on_stop, delivered_at,
+                   remind_soft_threshold, remind_hard_threshold
             FROM message_queue
             WHERE target_session_id = ? AND delivered_at IS NULL
             ORDER BY queued_at ASC
@@ -559,9 +561,10 @@ class MessageQueueManager:
                 timeout_at=datetime.fromisoformat(row[7]) if row[7] else None,
                 notify_on_delivery=bool(row[8]),
                 notify_after_seconds=row[9],
-                delivered_at=datetime.fromisoformat(row[10]) if row[10] else None,
-                remind_soft_threshold=row[11],
-                remind_hard_threshold=row[12],
+                notify_on_stop=bool(row[10]),
+                delivered_at=datetime.fromisoformat(row[11]) if row[11] else None,
+                remind_soft_threshold=row[12],
+                remind_hard_threshold=row[13],
             )
             # Skip expired messages
             if msg.timeout_at and datetime.now() > msg.timeout_at:
@@ -1129,7 +1132,6 @@ class MessageQueueManager:
         Returns:
             Reminder ID
         """
-        import uuid
         reminder_id = uuid.uuid4().hex[:12]
         fire_at = datetime.now() + timedelta(seconds=delay_seconds)
 
@@ -1215,8 +1217,6 @@ class MessageQueueManager:
         Returns:
             Registration ID
         """
-        import uuid
-
         # Cancel any existing registration for this target
         self.cancel_remind(target_session_id)
 
@@ -1428,7 +1428,6 @@ class MessageQueueManager:
         Returns:
             Watch ID
         """
-        import uuid
         watch_id = uuid.uuid4().hex[:12]
 
         # Schedule async watch task
