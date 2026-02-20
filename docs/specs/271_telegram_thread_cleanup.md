@@ -11,8 +11,8 @@ the user has to hunt for the right topic every time.
 ### 1. Thread Creation: One Per Session, Always
 
 Every call to `_create_session_common()` (`session_manager.py:270`) triggers
-`_ensure_telegram_topic()` (`session_manager.py:410`), which creates a Telegram
-forum topic for the new session.
+`_ensure_telegram_topic()` (`session_manager.py:388-389`), which creates a
+Telegram forum topic for the new session.
 
 This includes:
 - EM sessions (`sm new`, `/new` from Telegram)
@@ -26,26 +26,33 @@ session — engineer, scout, architect, reviewer — gets its own Telegram topic
 
 ### 2. Thread Closure: Only Three Paths Trigger Cleanup
 
-`output_monitor.cleanup_session()` (lines 482–561) is the only function that
-closes a forum topic. It runs on exactly three triggers:
+`output_monitor.cleanup_session()` is the only function that closes a forum
+topic. It runs on exactly three triggers:
 
 | Trigger | Path | Closes topic? |
 |---------|------|---------------|
-| `sm kill <id>` | `server.py:1162` → `cleanup_session` | ✅ Yes |
-| Explicit API kill | `server.py:2122` → `cleanup_session` | ✅ Yes |
+| `sm kill <id>` | `server.py` → `cleanup_session` | ✅ Yes |
+| Explicit API kill | `server.py` → `cleanup_session` | ✅ Yes |
 | Tmux session dies (detected by monitor) | `output_monitor._handle_session_died` → `cleanup_session` | ✅ Yes (~30s lag) |
-| `sm clear` | `server.py:1080` | ❌ No (sends "Context cleared" message only) |
+| `sm clear` | `server.py` | ❌ No (sends "Context cleared" message only) |
 | Claude Code process exits (Stop hook fires) | None | ❌ No |
 | ChildMonitor detects completion | `child_monitor._notify_parent_completion` | ❌ No |
 
 **Critical gap**: When Claude Code finishes work and exits naturally, the
 _tmux session stays alive_ at a bash prompt. The output_monitor polls for tmux
-session existence (every ~30 polls = ~30 seconds), but since tmux is alive, it
-never calls `cleanup_session`. The topic stays open indefinitely.
+session existence (~every 30 seconds), but since tmux is alive, it never calls
+`cleanup_session`. The topic stays open indefinitely.
+
+**Note on cleanup_session scope**: `cleanup_session` also removes the session
+from the `session_manager.sessions` dict (`output_monitor.py:539-545`). This
+makes it unsuitable for closing topics after normal task completion — it would
+break `sm children --status completed` (`server.py:2043-2044`) and `sm clear`.
+The proposed fixes use a narrower `close_session_topic()` helper instead.
 
 ### 3. Observed Stale State (2026-02-19)
 
-Current sessions.json contains 13 sessions, all with open Telegram topics:
+Current sessions.json contains 13 sessions, all with open Telegram topics,
+all with live tmux:
 
 ```
 thread=12319  engineer-1614          idle  tmux=alive  created=2026-02-18
@@ -63,25 +70,25 @@ thread=14434  reviewer-240           running
 thread=15325  scout-271              running (this session)
 ```
 
-Of the 8 idle sessions, 7 are almost certainly done with their tasks — Claude
-Code has exited but tmux stays alive. Their topics are open and silent, adding
-noise to the forum sidebar.
+All 8 idle sessions have `completion_status=None` — ChildMonitor did not fire
+for them. They are parent/EM sessions, or older sessions spawned before
+ChildMonitor was in place. Their tmux sessions are alive (Claude Code may have
+exited but tmux keeps running), so output_monitor never triggers cleanup.
 
 **Thread accumulation rate**: Thread IDs advanced from 12319 to 15325 in ~2
-days. Past sessions (already killed/cleaned up) contributed to this range;
-visible accumulation of 13 open topics in a 2-day window confirms the rate.
+days. Visible accumulation of 13 open topics confirms the rate.
 
 ### 4. The EM Thread Continuity Problem
 
-The current state has two EM sessions with open topics: `em` (13824) and
-`em-fractal` (13447). Each `sm em` call on a new session creates a new topic.
-When the user runs `sm handoff`, the old EM session's Claude Code exits (tmux
-stays alive), and a new EM session is created with a new topic.
+Two EM sessions exist with open topics: `em` (13824) and `em-fractal` (13447).
+Each `sm em` call on a new session creates a new Telegram topic. When the EM
+runs `sm handoff`, the old EM's Claude Code exits (tmux stays alive), and a new
+EM session is created with a new topic.
 
-`is_em=True` is never set on any current session (all show `is_em=False` in
-sessions.json), even on sessions named "em". `sm em` sets `is_em=True` via
-`PATCH /sessions/{id}` (`server.py:929`), but the current sessions were either
-created before sm#256 or the `sm em` preflight was not run.
+The `is_em` flag (added in sm#256) is never set on any current session. Once
+sm#256 lands, `sm em` will set `is_em=True` on the calling session. But even
+then, each new EM session gets a new Telegram topic via `_ensure_telegram_topic`
+during session creation — **before** `sm em` can set `is_em=True`.
 
 Result: the user cannot reliably locate the EM thread because a new one appears
 after every `sm handoff`.
@@ -90,15 +97,13 @@ after every `sm handoff`.
 
 Telegram Bot API has **no `getForumTopics` endpoint**. We cannot enumerate open
 topics programmatically. We can only manage topics by known ID (from
-sessions.json). Topics from sessions that were already removed from sessions.json
-(e.g., older sessions cleaned up months ago whose topics were never closed)
-cannot be discovered or closed automatically.
+sessions.json). Topics from sessions already removed from sessions.json cannot
+be discovered or closed automatically.
 
 ### 6. What sm#200 Fixed
 
-sm#200 (merged in PR #268) added `close_forum_topic` to the kill and natural-
-death paths. This was the correct fix for those paths. The gap it did not
-address: Claude Code process exit without tmux death.
+sm#200 (PR #268) added `close_forum_topic` to the kill and natural-death paths.
+The gap it did not address: Claude Code process exit without tmux death.
 
 ---
 
@@ -112,96 +117,147 @@ tmux death or explicit kill, so no topic closure happens. Idle/completed
 sessions accumulate open topics until someone runs `sm kill`.
 
 **B. EM has no thread continuity** — Each EM session (created by `sm em` on
-a new session) gets a new Telegram topic. The user must hunt for the new EM
+a new session) gets a new Telegram topic created during `_create_session_common`
+before `sm em` can signal it's an EM session. The user must hunt for the new EM
 thread after every `sm handoff`.
 
 ---
 
 ## Proposed Solution
 
-### Fix A: Close child session topics on task completion
+The fix has three parts. Together they address the full problem:
 
-**Where**: `src/child_monitor.py`, `_notify_parent_completion()` (line 212)
+- Fix A: child sessions via ChildMonitor (sessions spawned with `--wait`)
+- Fix B: EM sessions specifically (thread continuity)
+- Fix C: all other idle/completed sessions (backlog and non-ChildMonitor cases)
 
-After the ChildMonitor sends the completion notification to the parent and sets
-`completion_status = COMPLETED`, trigger `cleanup_session()` on the child
-session. This sends "Session completed [id]: <message>" to the topic and closes
-it, then removes the session from the sessions dict.
+### Fix A: New `close_session_topic()` helper — call from ChildMonitor on completion
 
-**Implementation**:
+**Problem with using `cleanup_session`**: `cleanup_session` removes the session
+from `session_manager.sessions`, breaking `sm children --status completed` and
+`sm clear`. It also does not close codex-app server sessions (`kill_session`
+does that, `session_manager.py:1134-1141`), so calling it from ChildMonitor
+would leak codex-app resources.
 
-1. Add `output_monitor` reference to `ChildMonitor.__init__()` (already has
-   `session_manager`; add `output_monitor` via a setter or constructor param).
-2. In `_notify_parent_completion()`, after `child_session.completion_status =
-   CompletionStatus.COMPLETED`, call:
-   ```python
-   if self.output_monitor:
-       await self.output_monitor.cleanup_session(child_session)
-   ```
-3. Modify the "stopped" message in `cleanup_session` to use "Session completed"
-   instead of "Session stopped" when `completion_status == COMPLETED`.
+**The fix**: Add a new `close_session_topic(session)` method on
+`OutputMonitor` (or as a standalone helper) that:
 
-**Scope**: Only sessions registered with ChildMonitor (spawned with `--wait`).
-Sessions not registered with ChildMonitor (no parent, or parent didn't use
-`--wait`) are out of scope for this fix and rely on explicit `sm kill`.
+1. Sends "Session completed [id]: {message}" to the Telegram topic using
+   `send_with_fallback`.
+2. Calls `close_forum_topic(chat_id, thread_id)` if in forum mode.
+3. Removes the topic from in-memory mappings (`_topic_sessions`, `_session_threads`).
+4. Does NOT remove the session from `session_manager.sessions`.
+5. Does NOT affect codex-app session state.
 
-### Fix B: EM thread continuity across sessions
+**Where to call it**: In `child_monitor._notify_parent_completion()`, after
+setting `completion_status = CompletionStatus.COMPLETED`. Add an
+`output_monitor` reference to `ChildMonitor` via a setter (analogous to
+`set_session_manager`). Call:
 
-**Where**: `src/server.py`, `PATCH /sessions/{id}` handler (line 902)
+```python
+if self.output_monitor:
+    await self.output_monitor.close_session_topic(
+        child_session,
+        message=completion_msg or "Completed"
+    )
+```
 
-When `is_em=True` is set on a session, the server should:
+**Scope**: Only sessions registered with ChildMonitor (spawned with `--wait`
+via `sm dispatch`, `sm spawn --wait`, etc.). Sessions not registered
+with ChildMonitor rely on explicit `sm kill` or Fix C for topic cleanup.
+Fixes A + C together cover the full range.
 
-1. Find any OTHER session (or recently-stopped session in state) with
-   `is_em=True` and matching `telegram_chat_id`.
-2. If found, reuse its `telegram_thread_id`:
-   - Set `new_session.telegram_thread_id = prev_em.telegram_thread_id`
-   - Set `new_session.telegram_chat_id = prev_em.telegram_chat_id`
-   - Call `reopenForumTopic(chat_id, thread_id)` (Telegram allows reopening
-     closed topics).
-   - Post "EM session [new_id] continuing" to the thread.
-   - Skip calling `_ensure_telegram_topic()` for the new EM session (it now
-     has a thread_id already; `_ensure_telegram_topic` skips creation when
-     `thread_id` is already set).
-3. If no previous EM topic found, let `_ensure_telegram_topic()` create a new
-   one (existing behavior).
-4. Clear `is_em` from the previous EM session (transfer ownership).
+### Fix B: EM thread continuity — inherit previous EM topic at `sm em` time
 
-**Prerequisite**: Sessions need to remain in sessions.json briefly after
-their tmux dies or they're killed, OR the previous EM session's
-`telegram_thread_id` needs to be preserved in a config/metadata store. The
-simplest approach: query `session_manager.sessions` for any live session with
-`is_em=True` first (handles EM handoff while old session is still alive), then
-check recently-cleaned-up sessions. Since `cleanup_session` removes sessions
-from the dict, we need to persist the last EM topic ID separately.
+**The lifecycle**: Session is created via `_create_session_common` →
+`_ensure_telegram_topic` creates a new topic → user runs `sm em` which sets
+`is_em=True`. By the time `is_em=True` is set, the new EM session already has
+a freshly-created Telegram topic.
 
-**Recommended implementation**:
-Store `last_em_thread_id` and `last_em_chat_id` in a persistent config or
-sessions.json header-level field (not per-session). When a new `is_em=True`
-session is created, read these fields and inherit if present.
+**The fix**: When the endpoint that sets `is_em=True` fires:
 
-OR (simpler): Add a `SessionManager.em_topic: Optional[tuple[int, int]]`
-field (persisted to sessions.json at the top level) that is updated whenever
-an EM session is created or destroyed. The new EM session reads this at
-`sm em` time.
+1. Read `last_em_topic: {chat_id, thread_id}` from persistent storage (see
+   schema below).
+2. If a previous EM topic is found with the same `chat_id`:
+   a. Call `delete_forum_topic(new_session.telegram_chat_id, new_session.telegram_thread_id)` to remove the newly-created topic.
+   b. Set `new_session.telegram_thread_id = last_em_topic["thread_id"]`.
+   c. Call `reopenForumTopic(chat_id, thread_id)` (in case old topic was closed).
+   d. Post "EM session [new_id] continuing" to the thread.
+   e. Update in-memory `_topic_sessions` and `_session_threads` mappings.
+3. If no previous EM topic found, keep the newly-created topic (existing
+   behavior). Persist `last_em_topic` for future sessions.
+4. Write `last_em_topic: {chat_id, thread_id}` to persistent storage.
+5. On the OLD EM session(s): set `telegram_thread_id = None` and
+   `telegram_chat_id = None` (or leave chat_id if desired, but thread_id must
+   be nulled). Remove the old session's entry from `_topic_sessions` and
+   `_session_threads` in-memory mappings. This prevents `cleanup_session` from
+   closing the shared thread when the old EM session is later killed or dies
+   (cleanup_session fires on any session with `telegram_thread_id` set,
+   `output_monitor.py:506`).
+6. Clear `is_em=True` from any OTHER session in the sessions dict.
 
-### Fix C: Backlog cleanup for existing stale sessions
+**Persistent storage for `last_em_topic`**: Add a top-level field to
+sessions.json alongside the `sessions` array:
 
-For the current 8 idle sessions with open topics (and any future accumulation),
-add a `POST /admin/cleanup-idle-topics` endpoint (or a `sm clean` CLI command)
-that:
+```json
+{
+  "sessions": [...],
+  "em_topic": {"chat_id": -1003506774897, "thread_id": 13824}
+}
+```
 
-1. Iterates all sessions where `status == idle` and `last_activity` is older
-   than a threshold (e.g., 2 hours).
-2. For each, calls `cleanup_session()`.
-3. Returns count closed.
+`_load_state()` reads this field. `_save_state()` writes it whenever it changes.
+Schema is backward-compatible (missing field treated as None). No per-session
+schema change.
 
-This is a one-time maintenance tool, not a permanent behavioral change.
+**Fix B failure handling** — fail open, preserve mapping consistency:
 
-**Alternatively**: On server startup, `_reconcile_telegram_topics()` could be
-extended to close topics for sessions that are idle AND whose last activity was
-more than N hours ago. But this risks being too aggressive (e.g., closing an EM
-session that's been idle waiting for user input). Gate on `completion_status ==
-COMPLETED` OR (`parent_session_id is not None` AND idle > 2 hours).
+Rows are mutually exclusive, keyed on which step failed first:
+
+| Failing step | Precondition | Behavior |
+|--------------|--------------|----------|
+| `delete_forum_topic(new_topic)` fails | delete not yet run | Log warning. Abort inheritance entirely. Newly-created topic still exists — keep it. Update `last_em_topic` to the new (kept) topic. EM session proceeds with new topic. |
+| `reopenForumTopic(old_topic)` fails | delete SUCCEEDED (new topic is gone) | Log warning. Newly-created topic no longer exists. Create a brand-new topic via `create_forum_topic`. Update `last_em_topic` to the brand-new topic. EM session proceeds with brand-new topic. |
+| Post-continuation message fails | delete + reopen both succeeded | Log warning only. Continue with inherited topic. Non-critical, no fallback needed. |
+
+**Invariant**: After Fix B runs (success or failure), the session ALWAYS has
+a valid `telegram_thread_id` pointing to an open topic. The `last_em_topic` in
+sessions.json always points to the most recent successful EM topic.
+
+**Files**: `src/session_manager.py` (add `em_topic` field, persist/load),
+`src/server.py` (set `em_topic` when `is_em=True` set; trigger inheritance logic),
+`src/telegram_bot.py` (add `delete_forum_topic` call path for the replaced topic).
+
+### Fix C: Backlog cleanup — `close_session_topic()` for stale sessions
+
+Fix C operates in two modes to handle both future completions and the existing
+backlog.
+
+**Mode 1 — automated (safe)**: `POST /admin/cleanup-idle-topics` with no body:
+1. Iterates all sessions where `completion_status == CompletionStatus.COMPLETED`.
+2. Calls `close_session_topic(session, message="Completed")` for each.
+3. Returns `{closed: N, skipped: M}`.
+4. Does NOT touch sessions with `completion_status=None`.
+
+**Mode 2 — explicit (for backlog)**: `POST /admin/cleanup-idle-topics` with
+body `{"session_ids": ["id1", "id2", ...]}`:
+1. Closes topics for the exact session IDs listed.
+2. Rejects the request if any ID corresponds to a session with
+   `is_em=True` or `status=running` (safety guard).
+3. Returns `{closed: N, rejected: [{id, reason}]}`.
+
+**Existing backlog** (8 idle sessions with `completion_status=None`): These
+are not automatically touched by Mode 1. The user closes them via Mode 2 by
+listing specific session IDs once they confirm those sessions are done, OR via
+`sm kill` (which already closes topics via sm#200).
+
+**CLI wrapper** (`sm clean [--session-id ID ...]`):
+- No args: calls Mode 1 (safe automated cleanup).
+- With `--session-id`: calls Mode 2 with the specified IDs.
+
+**What Fix C does NOT do**: Does not remove sessions from the sessions dict.
+Does not close topics based on idle time alone (too risky for EM sessions
+waiting for user input).
 
 ---
 
@@ -209,12 +265,13 @@ COMPLETED` OR (`parent_session_id is not None` AND idle > 2 hours).
 
 | File | Change |
 |------|--------|
-| `src/child_monitor.py` | Add `output_monitor` ref; call `cleanup_session` on completion |
-| `src/server.py` | `PATCH /sessions/{id}`: EM thread inheritance when `is_em=True` set |
-| `src/session_manager.py` | Persist `last_em_topic` (chat_id, thread_id) at top level |
-| `src/output_monitor.py` | Use "Session completed" message when `completion_status == COMPLETED` |
+| `src/output_monitor.py` | Add `close_session_topic(session, message)` method |
+| `src/child_monitor.py` | Add `output_monitor` setter; call `close_session_topic` on completion |
+| `src/session_manager.py` | Add `em_topic` field; persist/load from sessions.json |
+| `src/server.py` | Handle `is_em=True`: inherit old EM topic, delete new, persist `em_topic` |
+| `src/telegram_bot.py` | Expose `delete_forum_topic` path used by Fix B |
 
-Fix C (backlog cleanup) optionally adds:
+Fix C optionally adds:
 | `src/server.py` | `POST /admin/cleanup-idle-topics` endpoint |
 | `src/cli/commands.py` | `sm clean` subcommand wrapper |
 
@@ -222,39 +279,49 @@ Fix C (backlog cleanup) optionally adds:
 
 ## Test Plan
 
-**Fix A: Child completion closes topic**
-1. Spawn a child agent with `--wait 30`. Observe the agent complete its task.
-2. Verify: ChildMonitor fires, parent receives completion notification.
-3. Verify: Telegram topic for child session receives "Session completed [id]"
-   and is marked closed in the forum.
-4. Verify: Session removed from sessions.json.
+### Automated (unit/integration)
 
-**Fix B: EM thread continuity**
-1. Create a session and run `sm em`. Note the Telegram topic thread_id.
-2. Run `sm handoff` — this exits the EM's Claude Code process.
-3. Create a new session and run `sm em` on it.
-4. Verify: The new EM session uses the SAME Telegram topic (no new topic
-   created). The topic is reopened if it was closed.
-5. Verify: "EM session [new_id] continuing" posted to the thread.
-6. Verify: The old EM session's `is_em` is cleared.
+**Fix A**:
+- Unit test: `close_session_topic()` called on a child session with a forum
+  topic → `close_forum_topic` called, session remains in `session_manager.sessions`
+  dict, `_topic_sessions` mapping cleared.
+- Unit test: `close_session_topic()` on a codex-app session → only Telegram
+  mappings affected; `codex_sessions` dict unchanged (no resource leak).
+- Integration test: Spawn child with `--wait`, simulate completion via
+  ChildMonitor → Telegram topic closed, session still visible via
+  `sm children --status completed`, `sm clear` still works.
 
-**Fix C: Backlog cleanup**
-1. Populate state with several idle sessions (with completion_status=COMPLETED
-   or idle >2h).
-2. Call `POST /admin/cleanup-idle-topics`.
-3. Verify: Telegram topics for those sessions are closed.
-4. Verify: Active/running sessions are NOT affected.
+**Fix B**:
+- Unit test: `is_em=True` set on session → `last_em_topic` persisted to
+  sessions.json.
+- Unit test: `is_em=True` set on second session when `last_em_topic` exists
+  → newly-created topic deleted, `telegram_thread_id` set to inherited value,
+  `reopenForumTopic` called.
+- Unit test: No `last_em_topic` in sessions.json → new topic kept (no
+  regression).
+- Unit test: `_load_state()` reads `em_topic` field correctly; missing field
+  → `em_topic=None` (backward compat).
 
-**Regression: existing kill/clear/natural-death paths**
-5. Kill a session — verify topic closed (sm#200 regression check).
-6. Clear a session — verify "Context cleared" message sent, topic stays open.
-7. Simulate tmux death — verify topic closed after ~30s.
+**Fix C**:
+- Unit test: `cleanup-idle-topics` with mix of COMPLETED and non-COMPLETED
+  sessions → only COMPLETED sessions get `close_session_topic` called.
+- Unit test: Running/idle sessions with `completion_status=None` are NOT
+  touched.
+
+### Manual smoke test
+
+1. Kill a session — verify topic closed (sm#200 regression check).
+2. Clear a session — verify "Context cleared" sent, topic stays open.
+3. Run `sm handoff` on EM, create new session, run `sm em` → verify new EM
+   session uses same Telegram thread as before, "EM session [id] continuing"
+   posted.
+4. Spawn child with `--wait 30`, wait for completion → verify topic closed,
+   child still visible in `sm children --status completed`.
 
 ---
 
 ## Classification
 
-**Single ticket**. Fixes A, B, and C are independent sub-fixes but all touch
-Telegram thread lifecycle and can be delivered by one engineer in a single PR
-without context overflow. Fix C is optional (low priority maintenance feature)
-and can be deferred.
+**Single ticket**. All three fixes can be delivered by one engineer in a
+single PR. Fix C (cleanup endpoint) is optional and can be deferred if schedule
+is tight.
