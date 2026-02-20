@@ -163,7 +163,7 @@ async def test_cleanup_session_full_workflow(output_monitor, mock_session, mock_
 
 
 @pytest.mark.asyncio
-async def test_cleanup_handles_telegram_delete_failure(output_monitor, mock_session, mock_session_manager):
+async def test_cleanup_handles_telegram_notification_failure(output_monitor, mock_session, mock_session_manager):
     """Test that cleanup continues even if Telegram notification fails (#200: try-and-fallback)."""
     # Add session to manager
     mock_session_manager.sessions[mock_session.id] = mock_session

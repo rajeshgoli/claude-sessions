@@ -1032,7 +1032,7 @@ Provide ONLY the summary, no preamble or questions."""
             chat_id=chat_id, message=message, message_thread_id=thread_id, silent=True
         )
         if msg_id is None:
-            await self.send_notification(chat_id=chat_id, message=message, reply_to_message_id=thread_id)
+            await self.send_notification(chat_id=chat_id, message=message, reply_to_message_id=thread_id, silent=True)
         return msg_id
 
     def register_session_thread(self, session_id: str, chat_id: int, message_id: int):

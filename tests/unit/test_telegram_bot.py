@@ -84,11 +84,28 @@ async def test_send_with_fallback_forum_failure_uses_reply_thread():
         tg, chat_id=10000, message="Session stopped [sess]", thread_id=50000
     )
 
-    # Two calls: forum first (silent probe), then reply-thread fallback
+    # Two calls: forum first (silent probe), then reply-thread fallback (also silent)
     assert tg.send_notification.call_count == 2
     assert tg.send_notification.call_args_list == [
         call(chat_id=10000, message="Session stopped [sess]", message_thread_id=50000, silent=True),
-        call(chat_id=10000, message="Session stopped [sess]", reply_to_message_id=50000),
+        call(chat_id=10000, message="Session stopped [sess]", reply_to_message_id=50000, silent=True),
     ]
     # Returns None (forum result) so callers know not to close forum topic
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_send_with_fallback_both_fail_logs_warning_not_error():
+    """Spec item 7: when both forum and fallback sends fail, failures are logged at WARNING not ERROR."""
+    tg = TelegramBot.__new__(TelegramBot)
+    tg.bot = AsyncMock()
+    tg.bot.send_message = AsyncMock(side_effect=Exception("network error"))
+
+    with patch("src.telegram_bot.logger") as mock_logger:
+        result = await tg.send_with_fallback(
+            chat_id=10000, message="Session stopped [sess]", thread_id=50000
+        )
+
+    assert result is None
+    mock_logger.error.assert_not_called()
+    assert mock_logger.warning.call_count == 2
