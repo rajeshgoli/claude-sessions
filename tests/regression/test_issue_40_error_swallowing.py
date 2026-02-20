@@ -399,7 +399,7 @@ async def test_monitor_loop_gives_up_after_max_retries(tmp_path, caplog):
     queue_mgr = MessageQueueManager(
         session_manager=mock_session_manager,
         db_path=str(tmp_path / "test.db"),
-        config={"timeouts": {"message_queue": {"initial_retry_delay_seconds": 0.001}}},
+        config={},
     )
 
     # Start monitoring first
@@ -411,12 +411,20 @@ async def test_monitor_loop_gives_up_after_max_retries(tmp_path, caplog):
 
     queue_mgr._get_sessions_with_pending = always_fail
 
-    # real retries complete in ~5ms; poll until loop gives up
-    with caplog.at_level("ERROR"):
-        for _ in range(100):
-            if "giving up" in caplog.text:
-                break
-            await asyncio.sleep(0.05)
+    # Mock asyncio.sleep so exponential backoff runs instantly.
+    # We use the real asyncio.sleep(0) inside so the event loop still switches
+    # tasks and the monitor loop can actually progress between test iterations.
+    _real_sleep = asyncio.sleep
+
+    async def instant_sleep(*args, **kwargs):
+        await _real_sleep(0)
+
+    with patch("asyncio.sleep", new=instant_sleep):
+        with caplog.at_level("ERROR"):
+            for _ in range(100):
+                if "giving up" in caplog.text:
+                    break
+                await asyncio.sleep(0.05)
 
     # Stop monitoring
     await queue_mgr.stop()
