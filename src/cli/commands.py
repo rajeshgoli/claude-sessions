@@ -1103,6 +1103,12 @@ def cmd_spawn(
     """
     Spawn a child agent session.
 
+    When the parent session has is_em=True, auto-registers the spawned child for:
+    - remind (soft=210s, hard=420s → EM session)
+    - context monitoring (alerts → EM session)
+    - notify-on-stop pointing to EM session
+    This mirrors what sm dispatch does (sm#277).
+
     Args:
         client: API client
         parent_session_id: Parent session ID (current session)
@@ -1141,18 +1147,61 @@ def cmd_spawn(
         return 1
 
     # Success
+    child_id = result["session_id"]
+    child_name = result.get("friendly_name") or result["name"]
+    provider = result.get("provider", "claude")
+
     if json_output:
         print(json_lib.dumps(result, indent=2))
     else:
-        child_id = result["session_id"]
-        child_name = result.get("friendly_name") or result["name"]
-        provider = result.get("provider", "claude")
         if provider == "codex-app":
             print(f"Spawned {child_name} ({child_id}) [codex-app]")
         else:
             print(f"Spawned {child_name} ({child_id}) in tmux session {result['tmux_session']}")
 
+    # Auto-register EM monitoring when parent is EM (sm#277)
+    parent_session = client.get_session(parent_session_id)
+    if parent_session and parent_session.get("is_em"):
+        _register_em_monitoring(client, child_id, parent_session_id)
+
     return 0
+
+
+def _register_em_monitoring(
+    client: SessionManagerClient,
+    child_id: str,
+    em_session_id: str,
+) -> None:
+    """Register remind, context monitoring, and notify-on-stop for an EM-spawned child (sm#277).
+
+    Args:
+        client: API client
+        child_id: Spawned child session ID
+        em_session_id: EM parent session ID (is_em=True)
+    """
+    # Remind: soft=210s, hard=420s, alerts → EM
+    remind_result = client.register_remind(child_id, soft_threshold=210, hard_threshold=420)
+    if remind_result is None:
+        print(f"  Warning: Failed to register remind for {child_id}", file=sys.stderr)
+
+    # Context monitoring: enabled, alerts → EM
+    _, cm_ok, _ = client.set_context_monitor(
+        child_id,
+        enabled=True,
+        requester_session_id=em_session_id,
+        notify_session_id=em_session_id,
+    )
+    if not cm_ok:
+        print(f"  Warning: Failed to enable context monitoring for {child_id}", file=sys.stderr)
+
+    # Notify-on-stop: fires → EM when child stops
+    ns_ok, ns_unavailable = client.arm_stop_notify(
+        child_id,
+        sender_session_id=em_session_id,
+        requester_session_id=em_session_id,
+    )
+    if not ns_ok and not ns_unavailable:
+        print(f"  Warning: Failed to arm stop notification for {child_id}", file=sys.stderr)
 
 
 _TOOL_DB_DEFAULT = "~/.local/share/claude-sessions/tool_usage.db"
