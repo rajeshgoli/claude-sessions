@@ -59,7 +59,14 @@
 |------|--------|
 | sm#200 | Merged PR #268 — Telegram thread cleanup |
 | sm#249 | Merged PR #270 — suppress remind during compaction |
-| sm#263 | Spec done — skip fence structural fix (3 bugs) |
+| sm#256 | Merged PR #272 — directional notify-on-stop (is_em flag + PATCH endpoint) |
+| sm#261 | Merged PR #273 — UTC fix in parent wake digest |
+| sm#263 | Merged PR #274 — skip fence structural fix (3 bugs) |
+| sm#255 | Merged PR #275 — redundant assignment + hardcoded path constant |
+| sm#267 | In flight — docs update |
+| sm#263 spec | Done — skip fence structural fix |
+| sm#271 spec | Done — Telegram thread cleanup spec |
+| sm#269 spec | Done — task-complete registration spec |
 | feature/183 | Branch deleted — rejected approach, non-urgent delivery fixed elsewhere |
 
 ## Post-Merge Steps (always)
