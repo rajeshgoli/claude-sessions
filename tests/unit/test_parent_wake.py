@@ -438,6 +438,75 @@ class TestParentWakeDigest:
 
         assert "[sm dispatch] Child update:" in digest
 
+    @pytest.mark.asyncio
+    async def test_digest_tool_timestamps_use_utc(self, mq):
+        """Recent activity ages must be positive regardless of host timezone.
+
+        SQLite CURRENT_TIMESTAMP is UTC (naive). The digest must compare against
+        UTC now — not local now — or results are negative on UTC-behind systems.
+
+        The test is deterministic: it patches datetime.now in src.message_queue to
+        simulate a UTC-8 machine regardless of actual host timezone.
+        """
+        import re
+        from datetime import timezone
+
+        # Fixed reference point
+        UTC_NOW = datetime(2026, 2, 20, 10, 0, 0)           # naive UTC
+        UTC_8_NOW = UTC_NOW - timedelta(hours=8)             # naive "local" on UTC-8
+        TOOL_TS = (UTC_NOW - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")  # SQLite format
+
+        # Subclass that makes .now() behave like a UTC-8 machine
+        class _FakeDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return UTC_8_NOW          # simulates datetime.now() on UTC-8
+                if tz == timezone.utc:
+                    return UTC_NOW.replace(tzinfo=timezone.utc)  # aware UTC
+                return datetime.now(tz)       # fallback for other tzinfos
+
+            @classmethod
+            def fromisoformat(cls, s):
+                return datetime.fromisoformat(s)  # delegate to real datetime
+
+        reg = ParentWakeRegistration(
+            id="r1",
+            child_session_id="child_tz",
+            parent_session_id="parent_tz",
+            period_seconds=600,
+            registered_at=UTC_8_NOW - timedelta(minutes=5),
+            last_wake_at=None,
+            last_status_at_prev_wake=None,
+        )
+        mq._parent_wake_registrations["child_tz"] = reg
+
+        child_session = MagicMock()
+        child_session.friendly_name = "tz-test"
+        child_session.agent_status_text = None
+        child_session.agent_status_at = None
+        mq.session_manager.get_session.return_value = child_session
+
+        tool_events = [
+            {"tool_name": "Bash", "target_file": None,
+             "bash_command": "pytest tests/", "timestamp": TOOL_TS},
+        ]
+
+        with patch("src.message_queue.datetime", _FakeDatetime), \
+             patch.object(mq, "_read_child_tail", return_value=tool_events):
+            digest = await mq._assemble_parent_wake_digest("child_tz", reg)
+
+        # Old code: datetime.now() → UTC_8_NOW = UTC - 8h → age = -478m  (FAIL)
+        # New code: datetime.now(timezone.utc).replace(tzinfo=None) → UTC_NOW → age = 2m (PASS)
+        match = re.search(r'\((-?\d+)m ago\)', digest)
+        assert match, f"Expected '(Nm ago)' in digest:\n{digest}"
+        age_minutes = int(match.group(1))
+
+        assert age_minutes >= 0, (
+            f"Age is negative ({age_minutes}m) — datetime.now() used instead of UTC now"
+        )
+        assert age_minutes <= 5, f"Age unexpectedly large: {age_minutes}m"
+
 
 # ---------------------------------------------------------------------------
 # TestParentWakeEscalation
