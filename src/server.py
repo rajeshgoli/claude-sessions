@@ -278,6 +278,8 @@ def _invalidate_session_cache(app: FastAPI, session_id: str, arm_skip: bool = Fa
             state.stop_notify_sender_name = None
             state.last_outgoing_sm_send_target = None
             state.last_outgoing_sm_send_at = None
+        # Cancel stale context-monitor notifications from this session (#241)
+        queue_mgr.cancel_context_monitor_messages_from(session_id)
 
 
 def create_app(
@@ -2444,20 +2446,26 @@ Or continue working if not done yet."""
                     target_session_id=notify_target,
                     text=msg,
                     delivery_mode="sequential",
+                    sender_session_id=session_id,
+                    message_category="context_monitor",
                 )
             return {"status": "compaction_logged"}
 
-        # Gate: skip unregistered sessions for usage/warning/critical events (#206)
-        if not session.context_monitor_enabled:
-            return {"status": "not_registered"}
-
         # Handle manual /clear event (from SessionStart clear hook)
+        # Must be before the registration gate — unregistered sessions still receive
+        # compaction notifications and need cancellation on context reset (#241).
         if data.get("event") == "context_reset":
             # Re-arm one-shot flags so warnings fire correctly in the new cycle.
             # Covers: TUI /clear and sm clear CLI (both trigger SessionStart source=clear).
             session._context_warning_sent = False
             session._context_critical_sent = False
+            if queue_mgr:
+                queue_mgr.cancel_context_monitor_messages_from(session_id)
             return {"status": "flags_reset"}
+
+        # Gate: skip unregistered sessions for usage/warning/critical events (#206)
+        if not session.context_monitor_enabled:
+            return {"status": "not_registered"}
 
         # Handle context usage update (from status line script)
         used_pct = data.get("used_percentage")
@@ -2492,6 +2500,8 @@ Or continue working if not done yet."""
                         target_session_id=session.context_monitor_notify,
                         text=msg,
                         delivery_mode="urgent",
+                        sender_session_id=session_id,
+                        message_category="context_monitor",
                     )
         elif used_pct >= warning_pct:
             if not session._context_warning_sent:
@@ -2511,6 +2521,8 @@ Or continue working if not done yet."""
                         target_session_id=session.context_monitor_notify,
                         text=msg,
                         delivery_mode="sequential",
+                        sender_session_id=session_id,
+                        message_category="context_monitor",
                     )
 
         return {"status": "ok", "used_percentage": used_pct}

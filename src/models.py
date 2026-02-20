@@ -398,6 +398,7 @@ class QueuedMessage:
     remind_soft_threshold: Optional[int] = None  # Seconds for soft remind after delivery (#188)
     remind_hard_threshold: Optional[int] = None  # Seconds for hard remind after delivery (#188)
     parent_session_id: Optional[str] = None  # EM to wake periodically after delivery (#225-C)
+    message_category: Optional[str] = None  # e.g. 'context_monitor' for cancellation scoping (#241)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -417,6 +418,7 @@ class QueuedMessage:
             "remind_soft_threshold": self.remind_soft_threshold,
             "remind_hard_threshold": self.remind_hard_threshold,
             "parent_session_id": self.parent_session_id,
+            "message_category": self.message_category,
         }
 
 
