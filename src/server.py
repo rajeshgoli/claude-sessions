@@ -1092,17 +1092,11 @@ def create_app(
             chat_id = session.telegram_chat_id
             thread_id = session.telegram_thread_id
             # Try forum-topic delivery; fall back to reply-thread if it fails.
-            msg_id = await telegram_bot.send_notification(
+            await telegram_bot.send_with_fallback(
                 chat_id=chat_id,
                 message=cleared_msg,
-                message_thread_id=thread_id,
+                thread_id=thread_id,
             )
-            if msg_id is None:
-                await telegram_bot.send_notification(
-                    chat_id=chat_id,
-                    message=cleared_msg,
-                    reply_to_message_id=thread_id,
-                )
 
         # Cancel periodic remind and parent wake (context reset means task is over) (#188, #225-C)
         queue_mgr = app.state.session_manager.message_queue_manager

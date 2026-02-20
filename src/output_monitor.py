@@ -485,7 +485,7 @@ class OutputMonitor:
 
         This includes:
         - Setting status to STOPPED
-        - Deleting Telegram forum topic (if exists)
+        - Sending "Session stopped" notification to Telegram thread (forum or reply-thread mode)
         - Cleaning up in-memory Telegram mappings
         - Removing from sessions dict
         - Saving state
@@ -513,11 +513,11 @@ class OutputMonitor:
                 chat_id = session.telegram_chat_id
 
                 # Try forum-topic delivery first; fall back to reply-thread on failure.
-                # send_notification() catches all errors internally and returns None on failure.
-                msg_id = await telegram_bot.send_notification(
+                # send_with_fallback() returns the forum msg_id if forum succeeded, None otherwise.
+                msg_id = await telegram_bot.send_with_fallback(
                     chat_id=chat_id,
                     message=stopped_msg,
-                    message_thread_id=thread_id,
+                    thread_id=thread_id,
                 )
 
                 if msg_id is not None:
@@ -529,13 +529,6 @@ class OutputMonitor:
                         logger.info(f"Closed Telegram forum topic for session {session_id}")
                     except Exception as e:
                         logger.warning(f"Could not close forum topic for {session_id}: {e}")
-                else:
-                    # Not a forum topic (or send failed) — try reply-thread mode
-                    await telegram_bot.send_notification(
-                        chat_id=chat_id,
-                        message=stopped_msg,
-                        reply_to_message_id=thread_id,
-                    )
 
                 # Clean up in-memory mappings
                 telegram_bot._topic_sessions.pop((chat_id, thread_id), None)

@@ -52,8 +52,8 @@ def mock_session_manager():
     manager.notifier.telegram.bot = AsyncMock()
     manager.notifier.telegram._topic_sessions = {}
     manager.notifier.telegram._session_threads = {}
-    # send_notification is async (try-and-fallback, #200); return msg_id to confirm forum path
-    manager.notifier.telegram.send_notification = AsyncMock(return_value=9999)
+    # send_with_fallback is async (#200); return msg_id to confirm forum path
+    manager.notifier.telegram.send_with_fallback = AsyncMock(return_value=9999)
 
     return manager
 
@@ -107,7 +107,7 @@ async def test_monitor_detects_tmux_death(output_monitor, mock_session, mock_ses
     mock_session_manager._save_state.assert_called()
 
     # "Session stopped" notification should have been sent (try-and-fallback, #200)
-    mock_session_manager.notifier.telegram.send_notification.assert_called()
+    mock_session_manager.notifier.telegram.send_with_fallback.assert_called()
 
     # Monitoring should have stopped
     assert mock_session.id not in output_monitor._tasks
@@ -143,7 +143,7 @@ async def test_cleanup_session_full_workflow(output_monitor, mock_session, mock_
     assert (12345, 67890) not in mock_session_manager.notifier.telegram._topic_sessions
     assert mock_session.id not in mock_session_manager.notifier.telegram._session_threads
     # "Session stopped" sent via try-and-fallback (#200); delete_forum_topic no longer used
-    mock_session_manager.notifier.telegram.send_notification.assert_called()
+    mock_session_manager.notifier.telegram.send_with_fallback.assert_called()
 
     # Hook output cache cleanup
     assert mock_session.id not in mock_session_manager.app.state.last_claude_output
@@ -160,8 +160,8 @@ async def test_cleanup_handles_telegram_delete_failure(output_monitor, mock_sess
     # Add session to manager
     mock_session_manager.sessions[mock_session.id] = mock_session
 
-    # Both forum and fallback sends fail (send_notification returns None)
-    mock_session_manager.notifier.telegram.send_notification = AsyncMock(return_value=None)
+    # Both forum and fallback sends fail (send_with_fallback returns None)
+    mock_session_manager.notifier.telegram.send_with_fallback = AsyncMock(return_value=None)
 
     # Call cleanup - should not raise
     await output_monitor.cleanup_session(mock_session)

@@ -44,8 +44,8 @@ def mock_session_manager():
     manager.notifier.telegram.bot = AsyncMock()
     manager.notifier.telegram._topic_sessions = {}
     manager.notifier.telegram._session_threads = {}
-    # send_notification is async; return a message_id so forum path is taken
-    manager.notifier.telegram.send_notification = AsyncMock(return_value=9999)
+    # send_with_fallback is async; return a message_id so forum path is taken
+    manager.notifier.telegram.send_with_fallback = AsyncMock(return_value=9999)
 
     return manager
 
@@ -72,12 +72,12 @@ async def test_cleanup_accesses_correct_telegram_attribute(output_monitor, mock_
     # Call cleanup
     await output_monitor.cleanup_session(mock_session)
 
-    # Verify that telegram.send_notification was called.
+    # Verify that telegram.send_with_fallback was called.
     # This would NOT happen if the code was still accessing telegram_bot (which doesn't exist).
-    mock_session_manager.notifier.telegram.send_notification.assert_called_once_with(
+    mock_session_manager.notifier.telegram.send_with_fallback.assert_called_once_with(
         chat_id=12345,
         message=f"Session stopped [{mock_session.id}]",
-        message_thread_id=67890,
+        thread_id=67890,
     )
 
 

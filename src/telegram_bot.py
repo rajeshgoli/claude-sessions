@@ -1015,6 +1015,16 @@ Provide ONLY the summary, no preamble or questions."""
             logger.error(f"Failed to send Telegram message: {e}")
             return None
 
+    async def send_with_fallback(self, chat_id: int, message: str, thread_id: int) -> Optional[int]:
+        """Try forum-topic delivery; fall back to reply-thread if it fails.
+
+        Returns the forum msg_id if forum delivery succeeded, None otherwise.
+        """
+        msg_id = await self.send_notification(chat_id=chat_id, message=message, message_thread_id=thread_id)
+        if msg_id is None:
+            await self.send_notification(chat_id=chat_id, message=message, reply_to_message_id=thread_id)
+        return msg_id
+
     def register_session_thread(self, session_id: str, chat_id: int, message_id: int):
         """Register a session's root message for threading."""
         self._session_threads[session_id] = (chat_id, message_id)

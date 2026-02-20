@@ -88,20 +88,18 @@ def _make_telegram_bot(send_forum_returns=1, send_fallback_returns=2):
     """
     Build a mock TelegramBot.
 
-    send_forum_returns: value returned by the first send_notification call
-      (None = forum send failed / not a forum topic)
-    send_fallback_returns: value returned by the second send_notification call
+    send_forum_returns: value returned by send_with_fallback
+      (None = forum send failed / not a forum topic; non-None = forum succeeded)
+    send_fallback_returns: unused (fallback is handled inside send_with_fallback)
     """
     tg = Mock()
     tg.bot = AsyncMock()
     tg._topic_sessions = {}
     tg._session_threads = {}
 
-    # Make send_notification return sequentially: first call → forum result,
-    # second call → fallback result.
-    tg.send_notification = AsyncMock(
-        side_effect=[send_forum_returns, send_fallback_returns]
-    )
+    # send_with_fallback returns the forum result: non-None = forum succeeded,
+    # None = forum failed (fallback attempted internally).
+    tg.send_with_fallback = AsyncMock(return_value=send_forum_returns)
     return tg
 
 
@@ -133,11 +131,11 @@ async def test_cleanup_kill_forum_mode(output_monitor_factory, forum_session):
 
     await monitor.cleanup_session(forum_session)
 
-    # Forum send was called first with message_thread_id
-    tg.send_notification.assert_any_call(
+    # Forum send called exactly once via send_with_fallback
+    tg.send_with_fallback.assert_called_once_with(
         chat_id=chat_id,
         message=f"Session stopped [{forum_session.id}]",
-        message_thread_id=thread_id,
+        thread_id=thread_id,
     )
 
     # close_forum_topic called because forum send succeeded
@@ -166,17 +164,14 @@ async def test_cleanup_kill_reply_thread_mode(output_monitor_factory, reply_sess
 
     await monitor.cleanup_session(reply_session)
 
-    # First call: forum attempt
-    first_call = tg.send_notification.call_args_list[0]
-    assert first_call.kwargs['message_thread_id'] == thread_id
-    assert "Session stopped" in first_call.kwargs['message']
+    # send_with_fallback called once with correct args
+    tg.send_with_fallback.assert_called_once_with(
+        chat_id=chat_id,
+        message=f"Session stopped [{reply_session.id}]",
+        thread_id=thread_id,
+    )
 
-    # Second call: reply-thread fallback
-    second_call = tg.send_notification.call_args_list[1]
-    assert second_call.kwargs['reply_to_message_id'] == thread_id
-    assert "Session stopped" in second_call.kwargs['message']
-
-    # close_forum_topic NOT called (forum send failed)
+    # close_forum_topic NOT called (forum send failed, send_with_fallback returned None)
     tg.bot.close_forum_topic.assert_not_called()
 
     # delete_forum_topic NOT called (old code path removed)
@@ -206,7 +201,7 @@ async def test_cleanup_kill_post_restart_reply_thread(output_monitor_factory, re
 
     # Fallback (reply-thread) path was taken
     tg.bot.close_forum_topic.assert_not_called()
-    assert tg.send_notification.call_count == 2
+    tg.send_with_fallback.assert_called_once()
 
     # Mappings removed
     assert (chat_id, thread_id) not in tg._topic_sessions
@@ -224,7 +219,7 @@ async def test_cleanup_no_telegram_configured(output_monitor_factory, no_tg_sess
     await monitor.cleanup_session(no_tg_session)
 
     # No Telegram calls made
-    tg.send_notification.assert_not_called()
+    tg.send_with_fallback.assert_not_called()
     tg.bot.close_forum_topic.assert_not_called()
 
 
@@ -293,15 +288,12 @@ def test_clear_sends_notification_forum_mode(forum_session):
     resp = client.post(f"/sessions/{forum_session.id}/clear", json={})
     assert resp.status_code == 200
 
-    # Forum send was called
-    tg.send_notification.assert_any_call(
+    # send_with_fallback called exactly once with correct args
+    tg.send_with_fallback.assert_called_once_with(
         chat_id=chat_id,
         message=f"Context cleared [{forum_session.id}] — ready for new task",
-        message_thread_id=thread_id,
+        thread_id=thread_id,
     )
-
-    # Fallback NOT called (forum succeeded)
-    assert tg.send_notification.call_count == 1
 
 
 def test_clear_sends_notification_reply_thread_mode(reply_session):
@@ -316,14 +308,12 @@ def test_clear_sends_notification_reply_thread_mode(reply_session):
     resp = client.post(f"/sessions/{reply_session.id}/clear", json={})
     assert resp.status_code == 200
 
-    # First attempt: forum
-    first_call = tg.send_notification.call_args_list[0]
-    assert first_call.kwargs['message_thread_id'] == thread_id
-
-    # Second attempt: reply-thread fallback
-    second_call = tg.send_notification.call_args_list[1]
-    assert second_call.kwargs['reply_to_message_id'] == thread_id
-    assert "Context cleared" in second_call.kwargs['message']
+    # send_with_fallback called once with correct args (fallback handled internally)
+    tg.send_with_fallback.assert_called_once_with(
+        chat_id=chat_id,
+        message=f"Context cleared [{reply_session.id}] — ready for new task",
+        thread_id=thread_id,
+    )
 
 
 def test_clear_no_telegram_configured(no_tg_session):
@@ -334,7 +324,7 @@ def test_clear_no_telegram_configured(no_tg_session):
     resp = client.post(f"/sessions/{no_tg_session.id}/clear", json={})
     assert resp.status_code == 200
 
-    tg.send_notification.assert_not_called()
+    tg.send_with_fallback.assert_not_called()
 
 
 def test_clear_thread_remains_open_after_clear(forum_session):
