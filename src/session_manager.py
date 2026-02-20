@@ -647,7 +647,6 @@ class SessionManager:
         # Directional notify-on-stop (#256): only EM→agent sends should enroll recipient.
         # Fail-closed: unknown sender treated as non-EM.
         if notify_on_stop and sender_session_id:
-            sender_session = self.sessions.get(sender_session_id)
             if not sender_session or not sender_session.is_em:
                 notify_on_stop = False
 

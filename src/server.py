@@ -916,7 +916,14 @@ def create_app(
                 raise HTTPException(status_code=400, detail=error)
 
             session.friendly_name = friendly_name
+
+        if is_em is not None:
+            session.is_em = is_em
+
+        if friendly_name is not None or is_em is not None:
             app.state.session_manager._save_state()
+
+        if friendly_name is not None:
             # Update tmux status bar
             if getattr(session, "provider", "claude") != "codex-app":
                 app.state.session_manager.tmux.set_status_bar(session.tmux_session, friendly_name)
@@ -925,10 +932,6 @@ def create_app(
                 success = await app.state.notifier.rename_session_topic(session, friendly_name)
                 if not success:
                     logger.warning(f"Failed to rename Telegram topic for session {session_id}")
-
-        if is_em is not None:
-            session.is_em = is_em
-            app.state.session_manager._save_state()
 
         return SessionResponse(
             id=session.id,
