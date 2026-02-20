@@ -667,6 +667,18 @@ class SessionManagerClient:
         )
         return success, unavailable
 
+    def task_complete(self, session_id: str) -> tuple[bool, bool, bool]:
+        """Call POST /sessions/{session_id}/task-complete. Returns (success, unavailable, em_notified)."""
+        data, success, unavailable = self._request(
+            "POST",
+            f"/sessions/{session_id}/task-complete",
+            {"requester_session_id": session_id},
+        )
+        if unavailable:
+            return False, True, False
+        em_notified = bool(data.get("em_notified")) if data else False
+        return success, False, em_notified
+
     def arm_stop_notify(
         self,
         session_id: str,
