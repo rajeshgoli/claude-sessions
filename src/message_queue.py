@@ -134,7 +134,11 @@ class MessageQueueManager:
                 notify_on_delivery INTEGER DEFAULT 0,
                 notify_after_seconds INTEGER,
                 notify_on_stop INTEGER DEFAULT 0,
-                delivered_at TIMESTAMP
+                delivered_at TIMESTAMP,
+                remind_soft_threshold INTEGER,
+                remind_hard_threshold INTEGER,
+                parent_session_id TEXT,
+                message_category TEXT DEFAULT NULL
             )
         """)
         cursor.execute("""
@@ -168,6 +172,9 @@ class MessageQueueManager:
         if "parent_session_id" not in columns:
             cursor.execute("ALTER TABLE message_queue ADD COLUMN parent_session_id TEXT")
             logger.info("Migrated message_queue: added parent_session_id column")
+        if "message_category" not in columns:
+            cursor.execute("ALTER TABLE message_queue ADD COLUMN message_category TEXT DEFAULT NULL")
+            logger.info("Migrated message_queue: added message_category column")
 
         # Remind registrations table (#188)
         cursor.execute("""
@@ -513,6 +520,7 @@ class MessageQueueManager:
         remind_soft_threshold: Optional[int] = None,
         remind_hard_threshold: Optional[int] = None,
         parent_session_id: Optional[str] = None,
+        message_category: Optional[str] = None,
     ) -> QueuedMessage:
         """
         Queue a message for delivery.
@@ -530,6 +538,7 @@ class MessageQueueManager:
             remind_soft_threshold: Seconds after delivery before soft remind fires (#188)
             remind_hard_threshold: Seconds after delivery before hard remind fires (#188)
             parent_session_id: EM session to wake periodically after delivery (#225-C)
+            message_category: Optional category tag, e.g. 'context_monitor', for scoped cancellation (#241)
 
         Returns:
             QueuedMessage with assigned ID
@@ -548,6 +557,7 @@ class MessageQueueManager:
             remind_soft_threshold=remind_soft_threshold,
             remind_hard_threshold=remind_hard_threshold,
             parent_session_id=parent_session_id,
+            message_category=message_category,
         )
 
         # Persist to database
@@ -555,8 +565,9 @@ class MessageQueueManager:
             INSERT INTO message_queue
             (id, target_session_id, sender_session_id, sender_name, text,
              delivery_mode, queued_at, timeout_at, notify_on_delivery, notify_after_seconds,
-             notify_on_stop, remind_soft_threshold, remind_hard_threshold, parent_session_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             notify_on_stop, remind_soft_threshold, remind_hard_threshold, parent_session_id,
+             message_category)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             msg.id,
             msg.target_session_id,
@@ -572,6 +583,7 @@ class MessageQueueManager:
             msg.remind_soft_threshold,
             msg.remind_hard_threshold,
             msg.parent_session_id,
+            msg.message_category,
         ))
 
         queue_len = self.get_queue_length(target_session_id)
@@ -615,7 +627,8 @@ class MessageQueueManager:
             SELECT id, target_session_id, sender_session_id, sender_name, text,
                    delivery_mode, queued_at, timeout_at, notify_on_delivery,
                    notify_after_seconds, notify_on_stop, delivered_at,
-                   remind_soft_threshold, remind_hard_threshold, parent_session_id
+                   remind_soft_threshold, remind_hard_threshold, parent_session_id,
+                   message_category
             FROM message_queue
             WHERE target_session_id = ? AND delivered_at IS NULL
             ORDER BY queued_at ASC
@@ -638,7 +651,8 @@ class MessageQueueManager:
                 delivered_at=datetime.fromisoformat(row[11]) if row[11] else None,
                 remind_soft_threshold=row[12],
                 remind_hard_threshold=row[13],
-                parent_session_id=row[14] if len(row) > 14 else None,
+                parent_session_id=row[14],
+                message_category=row[15],
             )
             # Skip expired messages
             if msg.timeout_at and datetime.now() > msg.timeout_at:
@@ -677,6 +691,33 @@ class MessageQueueManager:
             (session_id,)
         )
         logger.info(f"Cleaned up {count} pending message(s) for non-existent session {session_id}")
+
+    def cancel_context_monitor_messages_from(self, sender_session_id: str) -> int:
+        """Cancel undelivered context-monitor notifications from sender_session_id.
+
+        Called on sm clear to discard stale compaction/warning/critical alerts
+        before they reach the parent EM (#241). Does NOT affect sm send traffic
+        from the same sender (those have message_category=NULL).
+
+        Returns:
+            Number of messages cancelled.
+        """
+        rows = self._execute_query(
+            "SELECT COUNT(*) FROM message_queue "
+            "WHERE sender_session_id = ? AND message_category = 'context_monitor' AND delivered_at IS NULL",
+            (sender_session_id,)
+        )
+        count = rows[0][0] if rows else 0
+        if count:
+            self._execute(
+                "DELETE FROM message_queue "
+                "WHERE sender_session_id = ? AND message_category = 'context_monitor' AND delivered_at IS NULL",
+                (sender_session_id,)
+            )
+            logger.info(
+                f"Cancelled {count} stale context-monitor message(s) from cleared session {sender_session_id}"
+            )
+        return count
 
     # =========================================================================
     # User Input Detection and Management
