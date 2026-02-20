@@ -1706,8 +1706,7 @@ def cmd_tail(
         return 0
 
     # --- Structured mode: query tool_usage.db ---
-    default_db = "~/.local/share/claude-sessions/tool_usage.db"
-    db_path = Path(db_path_override or default_db).expanduser()
+    db_path = Path(db_path_override or _TOOL_DB_DEFAULT).expanduser()
     if not db_path.exists():
         print(f"No tool usage data available (DB not found: {db_path})", file=sys.stderr)
         return 1

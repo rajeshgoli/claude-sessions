@@ -1736,7 +1736,6 @@ class MessageQueueManager:
 
         if child_session:
             child_name = child_session.friendly_name or child_session.name or child_session_id
-            child_id_short = child_session_id[:8]
 
             # Status text and age
             if child_session.agent_status_text:
