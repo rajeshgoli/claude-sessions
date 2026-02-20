@@ -134,7 +134,11 @@ class MessageQueueManager:
                 notify_on_delivery INTEGER DEFAULT 0,
                 notify_after_seconds INTEGER,
                 notify_on_stop INTEGER DEFAULT 0,
-                delivered_at TIMESTAMP
+                delivered_at TIMESTAMP,
+                remind_soft_threshold INTEGER,
+                remind_hard_threshold INTEGER,
+                parent_session_id TEXT,
+                message_category TEXT DEFAULT NULL
             )
         """)
         cursor.execute("""
@@ -623,7 +627,8 @@ class MessageQueueManager:
             SELECT id, target_session_id, sender_session_id, sender_name, text,
                    delivery_mode, queued_at, timeout_at, notify_on_delivery,
                    notify_after_seconds, notify_on_stop, delivered_at,
-                   remind_soft_threshold, remind_hard_threshold, parent_session_id
+                   remind_soft_threshold, remind_hard_threshold, parent_session_id,
+                   message_category
             FROM message_queue
             WHERE target_session_id = ? AND delivered_at IS NULL
             ORDER BY queued_at ASC
@@ -646,7 +651,8 @@ class MessageQueueManager:
                 delivered_at=datetime.fromisoformat(row[11]) if row[11] else None,
                 remind_soft_threshold=row[12],
                 remind_hard_threshold=row[13],
-                parent_session_id=row[14] if len(row) > 14 else None,
+                parent_session_id=row[14],
+                message_category=row[15],
             )
             # Skip expired messages
             if msg.timeout_at and datetime.now() > msg.timeout_at:
