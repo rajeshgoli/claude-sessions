@@ -1201,7 +1201,7 @@ def _register_em_monitoring(
         print(f"  Warning: Failed to enable context monitoring for {child_id}", file=sys.stderr)
 
     # Notify-on-stop: fires → EM when child stops
-    ns_ok, ns_unavailable = client.arm_stop_notify(
+    ns_ok, _ = client.arm_stop_notify(
         child_id,
         sender_session_id=em_session_id,
         requester_session_id=em_session_id,
