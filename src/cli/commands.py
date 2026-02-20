@@ -1162,7 +1162,9 @@ def cmd_spawn(
     # Auto-register EM monitoring when parent is EM (sm#277)
     parent_session = client.get_session(parent_session_id)
     if parent_session and parent_session.get("is_em"):
-        _register_em_monitoring(client, child_id, parent_session_id)
+        from .dispatch import get_auto_remind_config
+        soft_threshold, hard_threshold = get_auto_remind_config(os.getcwd())
+        _register_em_monitoring(client, child_id, parent_session_id, soft_threshold, hard_threshold)
 
     return 0
 
@@ -1171,6 +1173,8 @@ def _register_em_monitoring(
     client: SessionManagerClient,
     child_id: str,
     em_session_id: str,
+    soft_threshold: int,
+    hard_threshold: int,
 ) -> None:
     """Register remind, context monitoring, and notify-on-stop for an EM-spawned child (sm#277).
 
@@ -1178,9 +1182,11 @@ def _register_em_monitoring(
         client: API client
         child_id: Spawned child session ID
         em_session_id: EM parent session ID (is_em=True)
+        soft_threshold: Soft remind threshold in seconds (from config.yaml or default)
+        hard_threshold: Hard remind threshold in seconds (from config.yaml or default)
     """
-    # Remind: soft=210s, hard=420s, alerts → EM
-    remind_result = client.register_remind(child_id, soft_threshold=210, hard_threshold=420)
+    # Remind: thresholds from config.yaml (or defaults), alerts → EM
+    remind_result = client.register_remind(child_id, soft_threshold=soft_threshold, hard_threshold=hard_threshold)
     if remind_result is None:
         print(f"  Warning: Failed to register remind for {child_id}", file=sys.stderr)
 

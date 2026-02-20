@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from src.cli.commands import cmd_spawn, _register_em_monitoring
+from src.cli.dispatch import DEFAULT_DISPATCH_SOFT_THRESHOLD, DEFAULT_DISPATCH_HARD_THRESHOLD
 from src.message_queue import MessageQueueManager
 from src.models import Session, SessionStatus
 
@@ -72,6 +73,15 @@ def _make_client(
 
 class TestEmSpawnAutoRegister:
     """sm spawn auto-registers remind + context monitor + notify-on-stop when parent is EM."""
+
+    @pytest.fixture(autouse=True)
+    def patch_remind_config(self):
+        """Patch get_auto_remind_config to return defaults, keeping tests hermetic."""
+        with patch(
+            "src.cli.dispatch.get_auto_remind_config",
+            return_value=(DEFAULT_DISPATCH_SOFT_THRESHOLD, DEFAULT_DISPATCH_HARD_THRESHOLD),
+        ):
+            yield
 
     def test_em_parent_registers_remind(self):
         """When parent is_em=True, register_remind called with soft=210, hard=420."""
@@ -232,13 +242,13 @@ class TestRegisterEmMonitoring:
     """Unit tests for the _register_em_monitoring helper."""
 
     def test_remind_called_with_correct_thresholds(self):
-        """register_remind called with soft=210, hard=420 (per sm#277 spec)."""
+        """register_remind called with provided soft/hard thresholds."""
         client = MagicMock()
         client.register_remind.return_value = {"status": "registered"}
         client.set_context_monitor.return_value = (None, True, False)
         client.arm_stop_notify.return_value = (True, False)
 
-        _register_em_monitoring(client, "childXXX", "emYYY")
+        _register_em_monitoring(client, "childXXX", "emYYY", 210, 420)
         client.register_remind.assert_called_once_with("childXXX", soft_threshold=210, hard_threshold=420)
 
     def test_context_monitor_notify_points_to_em(self):
@@ -248,7 +258,7 @@ class TestRegisterEmMonitoring:
         client.set_context_monitor.return_value = (None, True, False)
         client.arm_stop_notify.return_value = (True, False)
 
-        _register_em_monitoring(client, "childXXX", "emYYY")
+        _register_em_monitoring(client, "childXXX", "emYYY", 210, 420)
         client.set_context_monitor.assert_called_once_with(
             "childXXX",
             enabled=True,
@@ -263,7 +273,7 @@ class TestRegisterEmMonitoring:
         client.set_context_monitor.return_value = (None, True, False)
         client.arm_stop_notify.return_value = (True, False)
 
-        _register_em_monitoring(client, "childXXX", "emYYY")
+        _register_em_monitoring(client, "childXXX", "emYYY", 210, 420)
         client.arm_stop_notify.assert_called_once_with(
             "childXXX",
             sender_session_id="emYYY",
