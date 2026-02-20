@@ -106,7 +106,7 @@ sqlite3 ~/.local/share/claude-sessions/tool_usage.db "SELECT * FROM tool_usage L
 
 ## Specs
 
-Design docs in `specs/`:
+Design docs in `docs/working/`:
 - `sm-new-and-attach.md` - CLI session commands
 - `tool-usage-logging.md` - Security audit logging
 

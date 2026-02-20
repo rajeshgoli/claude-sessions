@@ -6,7 +6,7 @@ Fix A — close_session_topic() in OutputMonitor + called by ChildMonitor on com
 Fix B — EM session thread continuity: inherit previous EM topic on sm em
 Fix C — POST /admin/cleanup-idle-topics endpoint
 
-Spec: docs/specs/271_telegram_thread_cleanup.md
+Spec: docs/working/271_telegram_thread_cleanup.md
 """
 
 import json
