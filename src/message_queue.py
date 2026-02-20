@@ -7,7 +7,7 @@ import sqlite3
 import subprocess
 import threading
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Dict, List, Callable, Awaitable, Tuple
 
@@ -1778,7 +1778,7 @@ class MessageQueueManager:
         if tool_events:
             lines.append("")
             lines.append("Recent activity:")
-            now = datetime.now()
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             for event in tool_events:
                 tool = event.get("tool_name", "?")
                 ts_str = event.get("timestamp", "")
