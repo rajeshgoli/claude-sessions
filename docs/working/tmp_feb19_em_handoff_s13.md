@@ -87,6 +87,7 @@ launchctl stop com.claude.session-manager && sleep 2 && launchctl start com.clau
 **Branch hygiene:**
 - Always `git checkout main` before committing specs
 - No orphaned branches remain (feature/183 deleted, feature/200 merged)
+- **Push all spec/working docs to main promptly** — user checks GitHub remotely. Commit as soon as working tree is clean. Include handoff docs too.
 
 **Force merge rule:** If architect finds ONLY test/branch hygiene issues → force merge directly (user directive)
 
