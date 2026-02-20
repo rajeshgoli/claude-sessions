@@ -2319,6 +2319,11 @@ def cmd_clear(
             name = session.get("friendly_name") or session.get("name") or target_session_id
             print(f"Cleared {name} ({target_session_id})")
 
+        # Best-effort clear of stale agent status for codex tmux sessions,
+        # which have no context_reset hook (#283). Non-critical — /new already succeeded.
+        if provider == "codex":
+            client.clear_agent_status(target_session_id)
+
         return 0
 
     except subprocess.CalledProcessError as e:

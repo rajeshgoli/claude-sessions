@@ -117,8 +117,8 @@ class PeriodicRemindRequest(BaseModel):
 
 
 class AgentStatusRequest(BaseModel):
-    """Request from an agent to self-report its current status (#188)."""
-    text: str
+    """Request from an agent to self-report its current status (#188). text=None clears status (#283)."""
+    text: Optional[str] = None
 
 
 class ClearSessionRequest(BaseModel):
@@ -1307,6 +1307,11 @@ def create_app(
             queue_mgr.cancel_remind(session_id)
             queue_mgr.cancel_parent_wake(session_id)
 
+        # Clear stale agent status from previous task (#283)
+        session.agent_status_text = None
+        session.agent_status_at = None
+        app.state.session_manager._save_state()
+
         return {"status": "cleared", "session_id": session_id}
 
     @app.post("/sessions/{session_id}/invalidate-cache")
@@ -2494,14 +2499,15 @@ Or continue working if not done yet."""
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        # Update session fields
+        # Update session fields; text=None clears the status (#283)
         session.agent_status_text = request.text
-        session.agent_status_at = datetime.now()
+        session.agent_status_at = datetime.now() if request.text is not None else None
         app.state.session_manager._save_state()
 
-        # Reset remind timer so cycle restarts from now
+        # Reset remind timer only when setting a non-null status — a clear call
+        # must not disturb an active remind registration on the new task (#283).
         queue_mgr = app.state.session_manager.message_queue_manager
-        if queue_mgr:
+        if request.text is not None and queue_mgr:
             queue_mgr.reset_remind(session_id)
 
         return {
@@ -2743,6 +2749,10 @@ Or continue working if not done yet."""
             # Covers: TUI /clear and sm clear CLI (both trigger SessionStart source=clear).
             session._context_warning_sent = False
             session._context_critical_sent = False
+            # Clear stale status from previous task (#283)
+            session.agent_status_text = None
+            session.agent_status_at = None
+            app.state.session_manager._save_state()
             if queue_mgr:
                 queue_mgr.cancel_context_monitor_messages_from(session_id)
             return {"status": "flags_reset"}

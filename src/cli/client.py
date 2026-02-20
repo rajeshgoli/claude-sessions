@@ -648,6 +648,15 @@ class SessionManagerClient:
         )
         return success, unavailable
 
+    def clear_agent_status(self, session_id: str) -> tuple[bool, bool]:
+        """Clear agent self-reported status text (text=null) (#283)."""
+        data, success, unavailable = self._request(
+            "POST",
+            f"/sessions/{session_id}/agent-status",
+            {"text": None},
+        )
+        return success, unavailable
+
     def register_remind(self, target_session_id: str, soft_threshold: int, hard_threshold: int) -> Optional[dict]:
         """Register a periodic remind for a session (#188)."""
         data, success, unavailable = self._request(
