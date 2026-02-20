@@ -153,10 +153,12 @@ Every managed session gets the `sm` command. This is how agents coordinate.
 |---------|---------|
 | `sm spawn "<prompt>" --name X` | Spawn child agent |
 | `sm send <id> "<text>"` | Send message to agent (+ Telegram) |
-| `sm wait <id> N` | Async wait, notify after N seconds |
+| `sm dispatch <id> --role X --task "..."` | Dispatch with auto-clear (primary EM command) |
+| `sm em [name]` | EM pre-flight: set name + enable context monitoring |
 | `sm clear <id>` | Clear agent context for reuse |
 | `sm attach <id>` | Open agent session in your terminal |
 | `sm children` | List your spawned agents |
+| `sm tail <id>` | Recent tool actions with timestamps |
 | `sm what <id>` | AI summary of what agent is doing |
 | `sm kill <id>` | Terminate an agent |
 | `sm output <id>` | See agent's recent output |
@@ -189,22 +191,24 @@ All modes forward to Telegram. You always see what's happening.
 The Engineering Manager orchestrates without doing implementation work.
 
 ```bash
-# 1. Spawn standby agents at session start
-sm spawn "As engineer, await tasks" --name engineer-standby --wait 600
-sm spawn "As architect, await tasks" --name architect-standby --wait 300
+# 1. Pre-flight (run first — sets name, context monitoring, registers children)
+sm em epic-987
 
-# 2. Dispatch work
-sm clear engineer-standby
-sm send engineer-standby "Implement ticket #123. When done: sm send $EM_ID 'done: PR created'" --urgent
-sm wait engineer-standby 600  # Async - EM goes idle
+# 2. Spawn standby agents if none exist
+sm spawn claude "As engineer, await tasks" --name engineer-standby
+sm spawn claude "As architect, await tasks" --name architect-standby
 
-# 3. Wake on notification, route to next agent
-sm send architect-standby "Review PR #456" --urgent
+# 3. Dispatch work (auto-clears before sending, arms periodic wake-up)
+sm dispatch engineer-standby --role engineer --urgent --task "Implement ticket #123"
+# EM goes idle — woken via notify-on-stop (done) or sm remind (still running, every ~210s)
 
-# 4. Repeat until workflow complete
+# 4. Wake on notification, route to next agent
+sm dispatch architect-standby --role architect --urgent --pr 456
+
+# 5. Repeat until workflow complete
 ```
 
-**Key insight:** EM's context is preserved across worker completions. Workers are disposable; EM maintains state.
+**Key insight:** EM's context is preserved across worker completions. Workers are disposable; EM maintains state. No polling — the system pages you.
 
 ---
 
@@ -220,6 +224,10 @@ Control your swarm from anywhere.
 | `/kill <id>` | Terminate session |
 | `/open <id>` | Open in Terminal.app (macOS) |
 | Reply to message | Send input to that session |
+
+**Session lifecycle notifications:**
+- **Kill** → "Session stopped [id]" message sent to the thread, then topic closed (history preserved)
+- **Clear** → "Context cleared [id] — ready for new task" message sent; thread stays open for the new task
 
 **Pro tip:** Each session gets its own Telegram thread. Conversations stay organized even with 10 agents running.
 
@@ -349,39 +357,40 @@ When asked to work "as EM" or orchestrate complex tasks, use the session manager
 
 ### Core Principle
 
-**Never wait synchronously.** Spawn workers, go idle, wake on notification.
+**Dispatch and go idle.** Spawn workers, go idle, wake on notification. Never poll.
 
-### Spawn Templates
+### Pre-Flight
+
+```bash
+sm em <epic>   # Mandatory first step: sets name, enables context monitoring for self + children
+sm children    # Check existing agents (reuse before spawning)
+```
+
+### Spawn Templates (only if no agent of that type exists)
 
 **Scout (Investigation):**
 ```bash
-sm spawn "As scout, investigate <problem>. \
-Write findings to docs/working/<name>.md. \
-Do NOT fix code - investigation only. \
-When done: sm send $EM_ID 'done: report at docs/working/<name>.md'" \
-  --name "scout-<task>" \
-  --wait 600
+sm spawn claude "As scout, await tasks" --name "scout-<task>"
+sm dispatch scout-<task> --role scout --urgent \
+  --task "Investigate <problem>. Write findings to docs/working/<name>.md. Do NOT fix code." \
+  --repo <path>
 ```
 
 **Engineer (Implementation):**
 ```bash
-sm spawn "As engineer, implement ticket #<N>. \
-Read the spec at docs/working/<spec>.md for context. \
-Create PR when done. \
-When done: sm send $EM_ID 'done: PR #<number> created'" \
-  --name "engineer-ticket<N>" \
-  --wait 600
+sm spawn claude "As engineer, await tasks" --name "engineer-ticket<N>"
+sm dispatch engineer-ticket<N> --role engineer --urgent \
+  --task "Implement ticket #<N>. Read spec at docs/working/<spec>.md." \
+  --repo <path> --spec docs/working/<spec>.md
 ```
 
 **Architect (Review):**
 ```bash
-sm spawn "As architect, review PR #<N>. \
-Check for: dead code, magic numbers, pattern consistency. \
-Merge to dev if approved. \
-When done: sm send $EM_ID 'review: approved|changes_needed'" \
-  --name "architect-pr<N>" \
-  --wait 300
+sm spawn claude "As architect, await tasks" --name "architect-pr<N>"
+sm dispatch architect-pr<N> --role architect --urgent --pr <N> --repo <path>
 ```
+
+`sm dispatch` handles clear-before-send automatically. EM goes idle after dispatch — woken via notify-on-stop (agent done) or sm remind (agent still running, ~210s intervals).
 
 ### Workflow: Implement an Epic
 
@@ -389,13 +398,14 @@ When done: sm send $EM_ID 'review: approved|changes_needed'" \
 "As EM, implement epic #<number>"
 ```
 
-1. Read epic to understand scope
-2. For each ticket:
-   - Spawn Engineer → implement
-   - Spawn Architect → review PR
-   - If changes needed → route feedback to Engineer
+1. `sm em <epic>` — pre-flight
+2. Read epic to understand scope
+3. For each ticket (ONE AT A TIME):
+   - Dispatch Engineer → implement, create PR
+   - Dispatch Architect → review PR
+   - If changes needed → clear engineer, re-dispatch fresh with findings baked in
    - If approved → Architect merges
-3. Notify human on completion
+4. Close epic: `gh issue close <epic#> --comment "All sub-issues complete: ..."`
 
 ### Workflow: Investigate and Spec
 
@@ -403,11 +413,12 @@ When done: sm send $EM_ID 'review: approved|changes_needed'" \
 "As EM, investigate <problem> and create a spec"
 ```
 
-1. Spawn Scout → investigation, write spec
-2. Spawn Architect → review spec
-3. Route feedback to Scout until approved
-4. Spawn Scout → file tickets
-5. Notify human: ready for review
+1. `sm em <task>` — pre-flight
+2. Dispatch Scout → investigation, write spec at `docs/working/<n>_<name>.md`
+3. Scout sends spec to Architect agent for review via `sm send`
+4. Scout and Architect iterate directly (EM tiebreaks only if escalated)
+5. On convergence, Scout pushes spec, notifies EM
+6. Notify human: ready for review
 
 ### Communication Patterns
 
@@ -415,19 +426,11 @@ When done: sm send $EM_ID 'review: approved|changes_needed'" \
 - **Urgent corrections:** `sm send $ID "UPDATE: use X instead" --urgent`
 - **Reports go in files:** Write to `docs/working/`, then notify
 
-### Timeout Guidelines
-
-| Agent | --wait |
-|-------|--------|
-| Scout | 600s (10 min) |
-| Engineer | 600s (10 min) |
-| Architect | 300s (5 min) |
-
 ### Circuit Breaker
 
 Pause and alert human when:
 - Tests fail unexpectedly
-- Agent stuck in loop
+- Agent stuck in loop (multiple reminds, no progress)
 - Unclear how to proceed
 
 ```
@@ -454,12 +457,14 @@ Add to your `.claude/settings.json` for auto-locking:
 
 | Command | When to Use |
 |---------|-------------|
-| `sm spawn "..." --name X --wait N` | Start a worker agent |
-| `sm send <id> "..." --urgent` | Send task to agent |
-| `sm wait <id> N` | Async wait for completion |
-| `sm clear <id>` | Reset agent for new task |
-| `sm children` | See your spawned agents |
-| `sm what <id>` | AI summary of agent activity |
+| `sm em [name]` | EM pre-flight: name + context monitoring |
+| `sm spawn claude "..." --name X` | Start a worker agent |
+| `sm dispatch <id> --role X --task "..."` | Dispatch task to agent (auto-clears) |
+| `sm send <id> "..." --urgent` | Manual send (follow-ups, one-liners) |
+| `sm clear <id>` | Reset agent for new task (sm dispatch does this) |
+| `sm children` | See your spawned agents + status |
+| `sm tail <id>` | Recent tool actions (fast, no haiku) |
+| `sm what <id>` | AI summary of agent activity (last resort) |
 | `sm attach <id>` | Jump into agent's session |
 | `sm output <id>` | See agent's recent output |
 | `sm kill <id>` | Terminate agent |
