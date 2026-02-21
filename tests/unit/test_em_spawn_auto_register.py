@@ -237,10 +237,12 @@ class TestSpawnProviderAwareModel:
     def test_claude_invalid_model_rejected(self, capsys):
         client = _make_client(parent_session=_make_non_em_session())
 
-        rc = cmd_spawn(client, "eng111bb", "claude", "Implement feature X", model="codex-5.1")
+        rc = cmd_spawn(client, "eng111bb", "claude", "Implement feature X", model="codex-5.1\x1b[31m")
 
         assert rc == 1
-        assert "invalid claude model" in capsys.readouterr().err.lower()
+        err = capsys.readouterr().err.lower()
+        assert "invalid claude model" in err
+        assert "\x1b" not in err
         client.spawn_child.assert_not_called()
 
     def test_codex_model_forwarded(self):

@@ -1129,7 +1129,7 @@ def cmd_spawn(
     safe_model_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
     if provider == "claude" and model is not None and model not in {"opus", "sonnet", "haiku"}:
         print(
-            f"Error: Invalid Claude model '{model}'. Choose one of: opus, sonnet, haiku",
+            "Error: Invalid Claude model. Choose one of: opus, sonnet, haiku",
             file=sys.stderr,
         )
         return 1
