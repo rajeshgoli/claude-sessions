@@ -33,6 +33,19 @@ async def test_analyze_content_sets_last_pattern_permission_then_none():
     assert monitor.get_session_state(session.id).last_pattern is None
 
 
+@pytest.mark.asyncio
+async def test_permission_pattern_takes_precedence_over_completion_when_batched():
+    monitor = OutputMonitor()
+    session = _make_session("monperm2")
+
+    await monitor._analyze_content(
+        session,
+        "Task complete\nAllow once? [Y/n]\n",
+    )
+
+    assert monitor.get_session_state(session.id).last_pattern == "permission"
+
+
 def test_output_bytes_window_tracks_last_10_seconds():
     monitor = OutputMonitor()
     session_id = "bytes123"

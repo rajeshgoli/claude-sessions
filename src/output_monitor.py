@@ -293,7 +293,8 @@ class OutputMonitor:
 
         # Check for completion
         if _completion_re.search(content):
-            matched_pattern = "completion"
+            if matched_pattern is None:
+                matched_pattern = "completion"
             await self._handle_completion(session, content)
 
         state.last_pattern = matched_pattern
