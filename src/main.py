@@ -490,6 +490,10 @@ class SessionManagerApp:
         await self.message_queue.start()
         logger.info("Message queue manager started")
 
+        # Start SessionManager background maintenance
+        await self.session_manager.start_background_tasks()
+        logger.info("Session manager background tasks started")
+
         # Start Telegram bot if configured
         if self.telegram_bot:
             await self.telegram_bot.start()
@@ -528,6 +532,9 @@ class SessionManagerApp:
 
         # Stop message queue manager
         await self.message_queue.stop()
+
+        # Stop SessionManager background maintenance
+        await self.session_manager.stop_background_tasks()
 
         # Stop Telegram bot
         if self.telegram_bot:

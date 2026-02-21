@@ -200,7 +200,7 @@ class CodexRequestLedger:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT request_id, session_id, request_type, request_method, status,
+                SELECT request_id, session_id, thread_id, turn_id, item_id, request_type, request_method, status,
                        requested_at, expires_at, resolved_payload_json, resolved_at,
                        resolution_source, error_code, error_message
                 FROM codex_pending_requests
@@ -220,6 +220,9 @@ class CodexRequestLedger:
             (
                 req_id,
                 session_id,
+                thread_id,
+                turn_id,
+                item_id,
                 request_type,
                 request_method,
                 status,
@@ -262,6 +265,9 @@ class CodexRequestLedger:
                     "request": {
                         "request_id": req_id,
                         "session_id": session_id,
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                        "item_id": item_id,
                         "request_type": request_type,
                         "request_method": request_method,
                         "status": "resolved",
@@ -282,6 +288,9 @@ class CodexRequestLedger:
                     "request": {
                         "request_id": req_id,
                         "session_id": session_id,
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                        "item_id": item_id,
                         "request_type": request_type,
                         "request_method": request_method,
                         "status": status,
@@ -319,7 +328,7 @@ class CodexRequestLedger:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT request_id, session_id, request_type, request_method, status,
+                SELECT request_id, session_id, thread_id, turn_id, item_id, request_type, request_method, status,
                        requested_at, expires_at, resolved_payload_json, resolved_at,
                        resolution_source, error_code, error_message
                 FROM codex_pending_requests
@@ -335,6 +344,9 @@ class CodexRequestLedger:
         (
             req_id,
             session_id,
+            thread_id,
+            turn_id,
+            item_id,
             request_type,
             request_method,
             status,
@@ -350,6 +362,9 @@ class CodexRequestLedger:
         return {
             "request_id": req_id,
             "session_id": session_id,
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "item_id": item_id,
             "request_type": request_type,
             "request_method": request_method,
             "status": status,
@@ -374,7 +389,7 @@ class CodexRequestLedger:
             cursor = conn.cursor()
             cursor.execute(
                 f"""
-                SELECT request_id, session_id, request_type, request_method, status,
+                SELECT request_id, session_id, thread_id, turn_id, item_id, request_type, request_method, status,
                        requested_at, expires_at, resolved_payload_json, resolved_at,
                        resolution_source, error_code, error_message
                 FROM codex_pending_requests
@@ -390,6 +405,9 @@ class CodexRequestLedger:
             (
                 req_id,
                 s_id,
+                thread_id,
+                turn_id,
+                item_id,
                 request_type,
                 request_method,
                 status,
@@ -405,6 +423,9 @@ class CodexRequestLedger:
                 {
                     "request_id": req_id,
                     "session_id": s_id,
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "item_id": item_id,
                     "request_type": request_type,
                     "request_method": request_method,
                     "status": status,
