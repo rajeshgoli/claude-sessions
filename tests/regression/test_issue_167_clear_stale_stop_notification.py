@@ -5,7 +5,9 @@ When an agent is reused via `sm clear` + `sm send`, the stop-hook notification
 should not relay the previous task's final message. These tests verify that:
 1. The server's /clear endpoint invalidates cached output and notification state
 2. The new /invalidate-cache endpoint works for CLI-driven clears
-3. The CLI cmd_clear calls invalidate_cache after tmux operations
+3. The CLI cmd_clear uses two-phase invalidation:
+   - pre-clear arming (`arm_skip=True`)
+   - post-clear finalize (`arm_skip=False`)
 """
 
 import pytest
@@ -129,7 +131,7 @@ def test_invalidate_preserves_other_sessions(app_with_state):
 
 
 # ============================================================================
-# CLI cmd_clear tests — verify invalidate_cache is called after tmux ops
+# CLI cmd_clear tests — verify two-phase invalidate_cache calls
 # ============================================================================
 
 
@@ -153,7 +155,7 @@ def mock_subprocess_run():
 
 
 def test_cmd_clear_calls_invalidate_cache(mock_client, mock_subprocess_run):
-    """cmd_clear should call invalidate_cache after tmux operations succeed."""
+    """cmd_clear should arm pre-clear then finalize post-clear."""
     session = {
         "id": "child-001",
         "name": "test-session",
@@ -174,11 +176,13 @@ def test_cmd_clear_calls_invalidate_cache(mock_client, mock_subprocess_run):
     )
 
     assert result == 0
-    mock_client.invalidate_cache.assert_called_once_with("child-001")
+    assert mock_client.invalidate_cache.call_count == 2
+    mock_client.invalidate_cache.assert_any_call("child-001", arm_skip=True)
+    mock_client.invalidate_cache.assert_any_call("child-001", arm_skip=False)
 
 
 def test_cmd_clear_invalidates_before_new_prompt(mock_client, mock_subprocess_run):
-    """Cache invalidation should happen before the new prompt is sent."""
+    """Pre-clear invalidation should still happen before the new prompt is sent."""
     session = {
         "id": "child-002",
         "name": "test-session",
@@ -199,7 +203,9 @@ def test_cmd_clear_invalidates_before_new_prompt(mock_client, mock_subprocess_ru
     )
 
     assert result == 0
-    mock_client.invalidate_cache.assert_called_once_with("child-002")
+    assert mock_client.invalidate_cache.call_count == 2
+    mock_client.invalidate_cache.assert_any_call("child-002", arm_skip=True)
+    mock_client.invalidate_cache.assert_any_call("child-002", arm_skip=False)
 
     # Verify invalidate_cache was called — tmux calls for the new prompt
     # should follow after the cache invalidation

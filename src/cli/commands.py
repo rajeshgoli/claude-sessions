@@ -2332,7 +2332,7 @@ def cmd_clear(
 
     # Invalidate server-side caches and arm skip_count BEFORE tmux operations,
     # so the /clear Stop hook is absorbed even if it arrives late (#174).
-    success, unavailable = client.invalidate_cache(target_session_id)
+    success, unavailable = client.invalidate_cache(target_session_id, arm_skip=True)
     if not success:
         if unavailable:
             print(
@@ -2415,6 +2415,23 @@ def cmd_clear(
         else:
             name = session.get("friendly_name") or session.get("name") or target_session_id
             print(f"Cleared {name} ({target_session_id})")
+
+        # Finalize cache reset after tmux clear succeeds.
+        # This applies canonical field resets (role/completion/status text) only on success.
+        success, unavailable = client.invalidate_cache(target_session_id, arm_skip=False)
+        if not success:
+            if unavailable:
+                print(
+                    f"Warning: Post-clear cache finalization skipped for {target_session_id}: "
+                    "server unavailable. Some status fields may be stale until next hook reset.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"Warning: Post-clear cache finalization failed for {target_session_id}. "
+                    "Some status fields may be stale until next hook reset.",
+                    file=sys.stderr,
+                )
 
         # Best-effort clear of stale agent status for codex tmux sessions,
         # which have no context_reset hook (#283). Non-critical — /new already succeeded.

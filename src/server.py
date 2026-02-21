@@ -280,6 +280,18 @@ def _invalidate_session_cache(app: FastAPI, session_id: str, arm_skip: bool = Fa
     app.state.last_claude_output.pop(session_id, None)
     app.state.pending_stop_notifications.discard(session_id)
 
+    # Canonical cross-provider reset for context clear workflows (#286).
+    # arm_skip=True is used by the tmux pre-clear phase to arm the skip fence.
+    # Defer field reset until finalize call (arm_skip=False) after clear succeeds.
+    if not arm_skip:
+        session = app.state.session_manager.get_session(session_id) if app.state.session_manager else None
+        if session:
+            session.role = None
+            session.completion_status = None
+            session.agent_status_text = None
+            session.agent_status_at = None
+            app.state.session_manager._save_state()
+
     queue_mgr = (
         app.state.session_manager.message_queue_manager
         if app.state.session_manager
@@ -500,6 +512,8 @@ def create_app(
             git_remote_url=session.git_remote_url,
             parent_session_id=session.parent_session_id,
             last_handoff_path=session.last_handoff_path,
+            agent_status_text=session.agent_status_text,
+            agent_status_at=session.agent_status_at.isoformat() if session.agent_status_at else None,
             is_em=session.is_em,
             activity_state=_get_activity_state(session),
         )
@@ -1453,7 +1467,10 @@ def create_app(
         return {"status": "cleared", "session_id": session_id}
 
     @app.post("/sessions/{session_id}/invalidate-cache")
-    async def invalidate_session_cache(session_id: str):
+    async def invalidate_session_cache(
+        session_id: str,
+        arm_skip: bool = Query(default=True),
+    ):
         """Invalidate server-side caches for a session.
 
         Called by the CLI after tmux-level clear operations so that stale
@@ -1467,7 +1484,7 @@ def create_app(
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        _invalidate_session_cache(app, session_id, arm_skip=True)
+        _invalidate_session_cache(app, session_id, arm_skip=arm_skip)
 
         return {"status": "invalidated", "session_id": session_id}
 

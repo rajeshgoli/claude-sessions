@@ -430,8 +430,9 @@ def test_consecutive_clears_increment_skip_count(app_with_state, message_queue):
 
 def test_cmd_clear_calls_invalidate_before_tmux(mock_client, mock_subprocess_run):
     """
-    invalidate_cache must be called BEFORE the tmux ESC + /clear operations,
-    so skip_count is armed before the /clear Stop hook can fire.
+    Two-phase invalidation ordering:
+    1) pre-clear invalidate_cache(arm_skip=True) before any tmux ops
+    2) post-clear invalidate_cache(arm_skip=False) after tmux clear succeeds
     """
     session = {
         "id": "child-174",
@@ -467,9 +468,11 @@ def test_cmd_clear_calls_invalidate_before_tmux(mock_client, mock_subprocess_run
     )
 
     assert result == 0
-    # invalidate_cache must come before any subprocess.run (tmux) calls
+    # First invalidate must come before any subprocess.run (tmux) calls.
     assert call_order[0] == "invalidate_cache"
-    assert all(c == "subprocess.run" for c in call_order[1:])
+    # Finalize invalidate should run after tmux operations.
+    assert call_order[-1] == "invalidate_cache"
+    assert "subprocess.run" in call_order[1:-1]
 
 
 def test_cmd_clear_invalidate_failure_does_not_block_clear(mock_client, mock_subprocess_run):
