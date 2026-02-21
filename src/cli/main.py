@@ -270,6 +270,28 @@ def main():
         help="Number of lines to capture (default: 30)"
     )
 
+    # sm codex-tui <session> [--poll-interval N] [--event-limit N]
+    codex_tui_parser = subparsers.add_parser(
+        "codex-tui",
+        help="Attach terminal UI for codex-app session state/events/requests",
+    )
+    codex_tui_parser.add_argument(
+        "session",
+        help="Session ID or friendly name"
+    )
+    codex_tui_parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=1.0,
+        help="Refresh interval seconds (default: 1.0)"
+    )
+    codex_tui_parser.add_argument(
+        "--event-limit",
+        type=int,
+        default=100,
+        help="Max event page size per poll (default: 100)"
+    )
+
     # sm tail <session> [-n N] [--raw] [--db-path PATH]
     tail_parser = subparsers.add_parser(
         "tail",
@@ -382,7 +404,7 @@ def main():
     no_session_needed = [
         "lock", "unlock", "subagent-start", "subagent-stop", "all", "send", "wait", "what",
         "subagents", "children", "kill", "new", "claude", "codex", "codex-app", "codex-server",
-        "attach", "output", "tail", "clear", "review", "context-monitor", "remind", "setup", None
+        "attach", "output", "codex-tui", "tail", "clear", "review", "context-monitor", "remind", "setup", None
     ]
     # Commands that require session_id: spawn (needs to set parent_session_id)
     requires_session_id = ["spawn"]
@@ -491,6 +513,13 @@ def main():
         sys.exit(commands.cmd_attach(client, args.session))
     elif args.command == "output":
         sys.exit(commands.cmd_output(client, args.session, args.lines))
+    elif args.command == "codex-tui":
+        sys.exit(commands.cmd_codex_tui(
+            client,
+            args.session,
+            poll_interval=args.poll_interval,
+            event_limit=args.event_limit,
+        ))
     elif args.command == "tail":
         sys.exit(commands.cmd_tail(
             client, args.session, args.n, args.raw,
