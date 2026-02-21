@@ -1754,6 +1754,44 @@ def cmd_output(client: SessionManagerClient, identifier: str, lines: int) -> int
     return 0
 
 
+def cmd_codex_tui(
+    client: SessionManagerClient,
+    identifier: str,
+    poll_interval: float = 1.0,
+    event_limit: int = 100,
+) -> int:
+    """
+    Launch codex-app terminal UI for live state/event/request control.
+
+    Exit codes:
+        0: Success
+        1: Invalid target session/provider
+        2: Session manager unavailable
+    """
+    session_id, session = resolve_session_id(client, identifier)
+    if session_id is None:
+        sessions = client.list_sessions()
+        if sessions is None:
+            print("Error: Session manager unavailable", file=sys.stderr)
+            return 2
+        print(f"Error: Session '{identifier}' not found", file=sys.stderr)
+        return 1
+
+    provider = session.get("provider", "claude")
+    if provider != "codex-app":
+        print("Error: sm codex-tui supports only provider=codex-app sessions", file=sys.stderr)
+        return 1
+
+    from .codex_tui import run_codex_tui
+
+    return run_codex_tui(
+        client=client,
+        session_id=session_id,
+        poll_interval=poll_interval,
+        event_limit=event_limit,
+    )
+
+
 def cmd_tail(
     client: SessionManagerClient,
     identifier: str,

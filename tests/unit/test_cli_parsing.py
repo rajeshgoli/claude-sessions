@@ -66,6 +66,12 @@ class TestCliParsing:
         output_parser.add_argument("session")
         output_parser.add_argument("--lines", type=int, default=30)
 
+        # sm codex-tui
+        codex_tui_parser = subparsers.add_parser("codex-tui")
+        codex_tui_parser.add_argument("session")
+        codex_tui_parser.add_argument("--poll-interval", type=float, default=1.0)
+        codex_tui_parser.add_argument("--event-limit", type=int, default=100)
+
         return parser.parse_args(args_list)
 
 
@@ -289,6 +295,28 @@ class TestOutputCommand:
         args = parser._get_parsed_args(["output", "session123", "--lines", "100"])
 
         assert args.lines == 100
+
+
+class TestCodexTuiCommand:
+    """Tests for 'sm codex-tui' command parsing."""
+
+    def test_codex_tui_defaults(self):
+        parser = TestCliParsing()
+        args = parser._get_parsed_args(["codex-tui", "abc123"])
+
+        assert args.command == "codex-tui"
+        assert args.session == "abc123"
+        assert args.poll_interval == 1.0
+        assert args.event_limit == 100
+
+    def test_codex_tui_custom_flags(self):
+        parser = TestCliParsing()
+        args = parser._get_parsed_args(
+            ["codex-tui", "abc123", "--poll-interval", "0.5", "--event-limit", "50"]
+        )
+
+        assert args.poll_interval == 0.5
+        assert args.event_limit == 50
 
 
 class TestSessionResolution:

@@ -63,6 +63,45 @@ class SessionManagerClient:
             # Other errors - treat as unavailable
             return None, False, True
 
+    def _request_with_status(
+        self,
+        method: str,
+        path: str,
+        data: Optional[dict] = None,
+        timeout: Optional[int] = None,
+    ) -> tuple[Optional[dict], Optional[int], bool]:
+        """
+        Make an HTTP request and return parsed body with HTTP status code.
+
+        Returns:
+            Tuple of (response_data, status_code, unavailable)
+        """
+        url = f"{self.api_url}{path}"
+        request_timeout = timeout if timeout is not None else API_TIMEOUT
+        headers = {"Content-Type": "application/json"}
+        body = json.dumps(data).encode() if data else None
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
+
+        def _decode(payload: bytes) -> Optional[dict]:
+            if not payload:
+                return None
+            try:
+                decoded = json.loads(payload.decode())
+                return decoded if isinstance(decoded, dict) else {"value": decoded}
+            except Exception:
+                return {"raw": payload.decode(errors="replace")}
+
+        try:
+            with urllib.request.urlopen(req, timeout=request_timeout) as response:
+                return _decode(response.read()), response.status, False
+        except urllib.error.HTTPError as e:
+            payload = e.read() if hasattr(e, "read") else b""
+            return _decode(payload), e.code, False
+        except urllib.error.URLError:
+            return None, None, True
+        except Exception:
+            return None, None, True
+
     def get_session(self, session_id: str) -> Optional[dict]:
         """Get session details."""
         data, success, _ = self._request("GET", f"/sessions/{session_id}")
@@ -240,6 +279,120 @@ class SessionManagerClient:
             payload
         )
         return success, unavailable
+
+    def send_input_with_result(
+        self,
+        session_id: str,
+        text: str,
+        sender_session_id: Optional[str] = None,
+        delivery_mode: str = "sequential",
+        from_sm_send: bool = False,
+        timeout_seconds: Optional[int] = None,
+        notify_on_delivery: bool = False,
+        notify_after_seconds: Optional[int] = None,
+        notify_on_stop: bool = False,
+        remind_soft_threshold: Optional[int] = None,
+        remind_hard_threshold: Optional[int] = None,
+        parent_session_id: Optional[str] = None,
+    ) -> dict:
+        """Send input and return full API result metadata."""
+        payload = {"text": text, "delivery_mode": delivery_mode, "from_sm_send": from_sm_send}
+        if sender_session_id:
+            payload["sender_session_id"] = sender_session_id
+        if timeout_seconds is not None:
+            payload["timeout_seconds"] = timeout_seconds
+        if notify_on_delivery:
+            payload["notify_on_delivery"] = notify_on_delivery
+        if notify_after_seconds is not None:
+            payload["notify_after_seconds"] = notify_after_seconds
+        if notify_on_stop:
+            payload["notify_on_stop"] = notify_on_stop
+        if remind_soft_threshold is not None:
+            payload["remind_soft_threshold"] = remind_soft_threshold
+        if remind_hard_threshold is not None:
+            payload["remind_hard_threshold"] = remind_hard_threshold
+        if parent_session_id is not None:
+            payload["parent_session_id"] = parent_session_id
+
+        data, status_code, unavailable = self._request_with_status(
+            "POST",
+            f"/sessions/{session_id}/input",
+            payload,
+        )
+        if unavailable:
+            return {"ok": False, "unavailable": True, "status_code": None, "detail": None}
+        ok = status_code in (200, 201)
+        detail = data.get("detail") if isinstance(data, dict) else None
+        return {"ok": ok, "unavailable": False, "status_code": status_code, "data": data, "detail": detail}
+
+    def get_codex_events(
+        self,
+        session_id: str,
+        since_seq: Optional[int] = None,
+        limit: int = 200,
+    ) -> Optional[dict]:
+        """Get codex lifecycle events page for a codex-app session."""
+        path = f"/sessions/{session_id}/codex-events?limit={limit}"
+        if since_seq is not None:
+            path += f"&since_seq={since_seq}"
+        data, success, unavailable = self._request("GET", path)
+        if unavailable or not success:
+            return None
+        return data
+
+    def get_codex_pending_requests(
+        self,
+        session_id: str,
+        include_orphaned: bool = False,
+    ) -> Optional[dict]:
+        """List pending (and optionally orphaned) codex structured requests."""
+        path = f"/sessions/{session_id}/codex-pending-requests"
+        if include_orphaned:
+            path += "?include_orphaned=true"
+        data, success, unavailable = self._request("GET", path)
+        if unavailable or not success:
+            return None
+        return data
+
+    def respond_codex_request(
+        self,
+        session_id: str,
+        request_id: str,
+        *,
+        decision: Optional[str] = None,
+        answers: Optional[dict] = None,
+    ) -> dict:
+        """Resolve one codex structured request and return result metadata."""
+        payload: dict = {}
+        if decision is not None and answers is not None:
+            return {
+                "ok": False,
+                "unavailable": False,
+                "status_code": 422,
+                "detail": "decision and answers are mutually exclusive",
+            }
+        if decision is not None:
+            payload["decision"] = decision
+        elif answers is not None:
+            payload["answers"] = answers
+        else:
+            return {
+                "ok": False,
+                "unavailable": False,
+                "status_code": 422,
+                "detail": "decision or answers is required",
+            }
+
+        data, status_code, unavailable = self._request_with_status(
+            "POST",
+            f"/sessions/{session_id}/codex-requests/{request_id}/respond",
+            payload,
+        )
+        if unavailable:
+            return {"ok": False, "unavailable": True, "status_code": None, "detail": None}
+        ok = status_code in (200, 201)
+        detail = data.get("detail") if isinstance(data, dict) else None
+        return {"ok": ok, "unavailable": False, "status_code": status_code, "data": data, "detail": detail}
 
     def spawn_child(
         self,
