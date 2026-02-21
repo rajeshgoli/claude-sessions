@@ -7,12 +7,13 @@ import subprocess
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Callable, Awaitable
+from typing import Optional, Callable, Awaitable, Any
 
 from .models import Session, SessionStatus, NotificationEvent, DeliveryResult, ReviewConfig
 from .tmux_controller import TmuxController
 from .codex_app_server import CodexAppServerSession, CodexAppServerConfig, CodexAppServerError
 from .codex_event_store import CodexEventStore
+from .codex_observability_logger import CodexObservabilityLogger
 from .codex_request_ledger import CodexRequestLedger
 from .github_reviews import post_pr_review_comment, poll_for_codex_review, get_pr_repo_from_git
 
@@ -42,6 +43,7 @@ class SessionManager:
         self.codex_active_turn_ids: dict[str, str] = {}
         self.codex_last_delta_at: dict[str, datetime] = {}
         self.codex_wait_states: dict[str, tuple[str, datetime]] = {}
+        self._codex_item_started_at: dict[tuple[str, str], datetime] = {}
         self.codex_working_delta_window_seconds = float(
             self.config.get("codex_events", {}).get("working_delta_window_seconds", 2.5)
         )
@@ -88,6 +90,20 @@ class SessionManager:
         self.codex_request_ledger = CodexRequestLedger(
             db_path=self.config.get("codex_requests", {}).get("db_path", default_requests_db),
             process_generation=self.process_generation,
+        )
+        codex_observability_config = self.config.get("codex_observability", {})
+        default_observability_db = str(self.state_file.with_name("codex_observability.db"))
+        self.codex_observability_logger = CodexObservabilityLogger(
+            db_path=codex_observability_config.get("db_path", default_observability_db),
+            retention_max_age_days=codex_observability_config.get("retention_max_age_days", 14),
+            retention_tool_events_per_session=codex_observability_config.get(
+                "retention_tool_events_per_session", 20000
+            ),
+            retention_turn_events_per_session=codex_observability_config.get(
+                "retention_turn_events_per_session", 5000
+            ),
+            payload_max_chars=codex_observability_config.get("payload_max_chars", 4000),
+            prune_interval_seconds=codex_observability_config.get("prune_interval_seconds", 3600),
         )
 
         # Message queue manager (set by main app)
@@ -393,6 +409,8 @@ class SessionManager:
                     on_turn_delta=self._handle_codex_turn_delta,
                     on_review_complete=self._handle_codex_review_complete,
                     on_server_request=self._handle_codex_server_request,
+                    on_item_notification=self._handle_codex_item_notification,
+                    on_stream_error=self._handle_codex_stream_error,
                 )
                 thread_id = await codex_session.start(thread_id=session.codex_thread_id, model=model)
                 session.codex_thread_id = thread_id
@@ -835,6 +853,14 @@ class SessionManager:
         """Attach hook output store (used to cache last responses)."""
         self.hook_output_store = store
 
+    async def start_background_tasks(self):
+        """Start periodic maintenance tasks owned by SessionManager."""
+        await self.codex_observability_logger.start_periodic_prune()
+
+    async def stop_background_tasks(self):
+        """Stop periodic maintenance tasks owned by SessionManager."""
+        await self.codex_observability_logger.stop_periodic_prune()
+
     async def _ensure_codex_session(self, session: Session, model: Optional[str] = None) -> Optional[CodexAppServerSession]:
         """Ensure a Codex app-server session is running for this session."""
         existing = self.codex_sessions.get(session.id)
@@ -851,6 +877,8 @@ class SessionManager:
                 on_turn_delta=self._handle_codex_turn_delta,
                 on_review_complete=self._handle_codex_review_complete,
                 on_server_request=self._handle_codex_server_request,
+                on_item_notification=self._handle_codex_item_notification,
+                on_stream_error=self._handle_codex_stream_error,
             )
             thread_id = await codex_session.start(thread_id=session.codex_thread_id, model=model)
             session.codex_thread_id = thread_id
@@ -924,6 +952,15 @@ class SessionManager:
                 "output_chars": len(text or ""),
             },
         )
+        self._safe_log_codex_turn_event(
+            session_id=session_id,
+            thread_id=self._thread_id_for_session(session_id),
+            turn_id=turn_id,
+            event_type="turn_completed",
+            status=status,
+            output_preview=text[:400] if text else "",
+            raw_payload={"status": status, "output_chars": len(text or "")},
+        )
 
         # Store last output (for /status, /last-message)
         if text and self.hook_output_store is not None:
@@ -996,6 +1033,14 @@ class SessionManager:
             turn_id=turn_id,
             payload={},
         )
+        self._safe_log_codex_turn_event(
+            session_id=session_id,
+            thread_id=self._thread_id_for_session(session_id),
+            turn_id=turn_id,
+            event_type="turn_started",
+            status="running",
+            raw_payload={},
+        )
         session = self.sessions.get(session_id)
         if not session:
             return
@@ -1018,6 +1063,16 @@ class SessionManager:
                 "delta_preview": delta[:240],
                 "delta_chars": len(delta),
             },
+        )
+        self._safe_log_codex_turn_event(
+            session_id=session_id,
+            thread_id=self._thread_id_for_session(session_id),
+            turn_id=turn_id,
+            event_type="turn_delta",
+            status="running",
+            delta_chars=len(delta),
+            output_preview=delta[:240],
+            raw_payload={"delta_chars": len(delta)},
         )
         session = self.sessions.get(session_id)
         if not session:
@@ -1123,6 +1178,20 @@ class SessionManager:
                 policy_payload=policy_payload,
             )
             request_ledger_id = pending["request_id"]
+            item_type = "commandExecution" if "commandExecution" in method else "fileChange"
+            if method == "item/tool/requestUserInput":
+                item_type = "tool"
+            self._safe_log_codex_tool_event(
+                session_id=session_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                item_id=item_id,
+                request_id=request_ledger_id,
+                event_type=event_type,
+                item_type=item_type,
+                phase="pre",
+                raw_payload=params,
+            )
         else:
             request_ledger_id = None
 
@@ -1143,6 +1212,146 @@ class SessionManager:
             return resolved
 
         return None
+
+    async def _handle_codex_item_notification(self, session_id: str, method: str, params: dict[str, Any]):
+        """Ingest codex item lifecycle notifications into observability storage."""
+        item = params.get("item", {}) if isinstance(params.get("item"), dict) else {}
+        item_id = item.get("id")
+        turn_id = params.get("turnId")
+        thread_id = self._thread_id_for_session(session_id)
+        now = datetime.now()
+
+        if method == "item/started":
+            item_type = item.get("type")
+            if item_type in ("commandExecution", "fileChange", "tool"):
+                if item_id:
+                    self._codex_item_started_at[(session_id, item_id)] = now
+                self._safe_log_codex_tool_event(
+                    session_id=session_id,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id=item_id,
+                    event_type="started",
+                    item_type=item_type,
+                    phase="running",
+                    command=item.get("command"),
+                    cwd=item.get("cwd"),
+                    file_path=item.get("filePath") or item.get("path"),
+                    diff_summary=item.get("diffSummary") or item.get("summary"),
+                    raw_payload=params,
+                )
+            return
+
+        if method in ("item/commandExecution/outputDelta", "item/fileChange/outputDelta"):
+            item_type = "commandExecution" if "commandExecution" in method else "fileChange"
+            delta = params.get("delta")
+            delta_summary = str(delta)[:240] if delta is not None else None
+            self._safe_log_codex_tool_event(
+                session_id=session_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                item_id=item_id,
+                event_type="output_delta",
+                item_type=item_type,
+                phase="running",
+                diff_summary=delta_summary,
+                raw_payload=params,
+            )
+            return
+
+        if method == "item/completed":
+            item_type = item.get("type")
+            if item_type not in ("commandExecution", "fileChange", "tool"):
+                return
+            status = str(item.get("status", "completed")).lower()
+            event_type_map = {
+                "completed": "completed",
+                "failed": "failed",
+                "interrupted": "interrupted",
+                "cancelled": "cancelled",
+                "timeout": "timeout",
+            }
+            event_type = event_type_map.get(status)
+            if event_type is None:
+                if "interrupt" in status:
+                    event_type = "interrupted"
+                elif "cancel" in status:
+                    event_type = "cancelled"
+                elif "fail" in status:
+                    event_type = "failed"
+                elif "timeout" in status:
+                    event_type = "timeout"
+                else:
+                    event_type = "completed"
+            started_at = self._codex_item_started_at.pop((session_id, item_id), None) if item_id else None
+            latency_ms = None
+            if started_at is not None:
+                latency_ms = int((now - started_at).total_seconds() * 1000)
+            self._safe_log_codex_tool_event(
+                session_id=session_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                item_id=item_id,
+                event_type=event_type,
+                item_type=item_type,
+                phase="post",
+                command=item.get("command"),
+                cwd=item.get("cwd"),
+                exit_code=item.get("exitCode"),
+                file_path=item.get("filePath") or item.get("path"),
+                diff_summary=item.get("diffSummary") or item.get("summary"),
+                latency_ms=latency_ms,
+                final_status=status,
+                error_code=item.get("errorCode"),
+                error_message=item.get("errorMessage"),
+                raw_payload=params,
+            )
+
+    async def _handle_codex_stream_error(self, session_id: str, error_code: str, error_message: str):
+        """Emit synthetic terminal observability events when app-server stream closes unexpectedly."""
+        turn_id = self.codex_active_turn_ids.get(session_id)
+        thread_id = self._thread_id_for_session(session_id)
+        self._safe_log_codex_tool_event(
+            session_id=session_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            event_type="failed",
+            item_type="tool",
+            phase="post",
+            final_status="failed",
+            error_code=error_code,
+            error_message=error_message,
+            raw_payload={"error_code": error_code, "error_message": error_message},
+        )
+        self._safe_log_codex_turn_event(
+            session_id=session_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            event_type="turn_stream_error",
+            status="failed",
+            error_code=error_code,
+            error_message=error_message,
+            raw_payload={"error_code": error_code, "error_message": error_message},
+        )
+
+    def _thread_id_for_session(self, session_id: str) -> Optional[str]:
+        codex_session = self.codex_sessions.get(session_id)
+        if codex_session and codex_session.thread_id:
+            return codex_session.thread_id
+        session = self.sessions.get(session_id)
+        return session.codex_thread_id if session else None
+
+    def _safe_log_codex_tool_event(self, **kwargs: Any):
+        try:
+            self.codex_observability_logger.log_tool_event(**kwargs)
+        except Exception as exc:
+            logger.warning("Failed to log codex tool event for %s: %s", kwargs.get("session_id"), exc)
+
+    def _safe_log_codex_turn_event(self, **kwargs: Any):
+        try:
+            self.codex_observability_logger.log_turn_event(**kwargs)
+        except Exception as exc:
+            logger.warning("Failed to log codex turn event for %s: %s", kwargs.get("session_id"), exc)
 
     def get_activity_state(self, session_or_id: Session | str) -> str:
         """Get computed activity state for API consumers."""
@@ -1196,11 +1405,33 @@ class SessionManager:
                 "error_code": "request_not_found",
                 "error_message": "request id not found for session",
             }
-        return await self.codex_request_ledger.resolve_request(
+        result = await self.codex_request_ledger.resolve_request(
             request_id=request_id,
             response_payload=response_payload,
             resolution_source="api",
         )
+        if result.get("ok"):
+            event_type = "approval_decision" if "decision" in response_payload else "user_input_submitted"
+            request_method = request.get("request_method", "")
+            if "commandExecution" in request_method:
+                item_type = "commandExecution"
+            elif "fileChange" in request_method:
+                item_type = "fileChange"
+            else:
+                item_type = "tool"
+            self._safe_log_codex_tool_event(
+                session_id=session_id,
+                thread_id=request.get("thread_id"),
+                turn_id=request.get("turn_id"),
+                item_id=request.get("item_id"),
+                request_id=request_id,
+                event_type=event_type,
+                item_type=item_type,
+                phase="post",
+                approval_decision=response_payload.get("decision"),
+                raw_payload=response_payload,
+            )
+        return result
 
     def has_pending_codex_requests(self, session_id: str) -> bool:
         """Return True when unresolved structured codex requests block chat input."""
@@ -1222,6 +1453,8 @@ class SessionManager:
                 return False
             try:
                 self.codex_request_ledger.orphan_pending_for_session(session_id, error_code="thread_reset")
+                for key in [k for k in self._codex_item_started_at if k[0] == session_id]:
+                    self._codex_item_started_at.pop(key, None)
                 self.codex_turns_in_flight.discard(session_id)
                 self.codex_active_turn_ids.pop(session_id, None)
                 self.codex_last_delta_at.pop(session_id, None)
@@ -1367,6 +1600,8 @@ class SessionManager:
                 except RuntimeError:
                     asyncio.run(codex_session.close())
             self.codex_request_ledger.orphan_pending_for_session(session_id)
+            for key in [k for k in self._codex_item_started_at if k[0] == session_id]:
+                self._codex_item_started_at.pop(key, None)
             self.codex_turns_in_flight.discard(session_id)
             self.codex_active_turn_ids.pop(session_id, None)
             self.codex_last_delta_at.pop(session_id, None)

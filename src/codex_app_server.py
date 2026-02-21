@@ -49,6 +49,8 @@ class CodexAppServerSession:
         on_turn_delta: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
         on_review_complete: Optional[Callable[[str, str], Awaitable[None]]] = None,
         on_server_request: Optional[Callable[[str, int, str, dict[str, Any]], Awaitable[Optional[dict[str, Any]]]]] = None,
+        on_item_notification: Optional[Callable[[str, str, dict[str, Any]], Awaitable[None]]] = None,
+        on_stream_error: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
     ):
         self.session_id = session_id
         self.working_dir = working_dir
@@ -58,6 +60,8 @@ class CodexAppServerSession:
         self.on_turn_delta = on_turn_delta
         self.on_review_complete = on_review_complete
         self.on_server_request = on_server_request
+        self.on_item_notification = on_item_notification
+        self.on_stream_error = on_stream_error
 
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._reader_task: Optional[asyncio.Task] = None
@@ -70,11 +74,13 @@ class CodexAppServerSession:
         self._turn_buffers: dict[str, list[str]] = {}
         self._review_in_progress: bool = False
         self._review_id: Optional[str] = None
+        self._closing: bool = False
 
     async def start(self, thread_id: Optional[str] = None, model: Optional[str] = None) -> str:
         """Start app-server and create or resume a thread. Returns thread_id."""
         if self._proc:
             return self.thread_id or ""
+        self._closing = False
 
         cmd = [self.config.command, "app-server", *self.config.args]
         self._proc = await asyncio.create_subprocess_exec(
@@ -232,6 +238,7 @@ class CodexAppServerSession:
 
     async def close(self):
         """Stop the app-server process."""
+        self._closing = True
         if self._reader_task:
             self._reader_task.cancel()
         if self._stderr_task:
@@ -317,6 +324,16 @@ class CodexAppServerSession:
             if "method" in message:
                 await self._handle_notification(message)
 
+        if not self._closing and self.on_stream_error:
+            try:
+                await self.on_stream_error(
+                    self.session_id,
+                    "app_server_stream_closed",
+                    "codex app-server stdout stream closed unexpectedly",
+                )
+            except Exception as exc:
+                logger.warning("Failed to report app-server stream close for %s: %s", self.session_id, exc)
+
     async def _read_stderr(self):
         assert self._proc and self._proc.stderr
         while True:
@@ -328,6 +345,9 @@ class CodexAppServerSession:
     async def _handle_notification(self, message: dict[str, Any]):
         method = message.get("method")
         params = message.get("params", {})
+
+        if method and method.startswith("item/") and self.on_item_notification:
+            await self.on_item_notification(self.session_id, method, params)
 
         if method == "turn/started":
             turn = params.get("turn", {})
