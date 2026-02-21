@@ -279,6 +279,15 @@ class TestSpawnProviderAwareModel:
             provider="codex-app",
         )
 
+    def test_codex_model_rejects_shell_metacharacters(self, capsys):
+        client = _make_client(parent_session=_make_non_em_session())
+
+        rc = cmd_spawn(client, "eng111bb", "codex", "Implement feature X", model="codex-5.1;touch_/tmp/pwned")
+
+        assert rc == 1
+        assert "invalid codex model" in capsys.readouterr().err.lower()
+        client.spawn_child.assert_not_called()
+
     def test_codex_app_em_parent_also_registers(self):
         """EM registration also fires for codex-app spawned children."""
         client = _make_client(
