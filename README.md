@@ -159,6 +159,7 @@ Every managed session gets the `sm` command. This is how agents coordinate.
 | `sm attach <id>` | Open agent session in your terminal |
 | `sm children` | List your spawned agents |
 | `sm tail <id>` | Recent tool actions with timestamps |
+| `sm codex-tui <id>` | Live codex-app state/events + structured request controls |
 | `sm what <id>` | AI summary of what agent is doing |
 | `sm kill <id>` | Terminate an agent |
 | `sm output <id>` | See agent's recent output |
@@ -303,11 +304,22 @@ Multiple agents, same repo, no conflicts. If another agent holds the lock, your 
 | `/sessions` | POST | Create session |
 | `/sessions` | GET | List sessions |
 | `/sessions/{id}/input` | POST | Send input |
+| `/sessions/{id}/codex-events` | GET | Durable codex lifecycle event stream (cursor-based) |
+| `/sessions/{id}/codex-pending-requests` | GET | List pending codex structured requests |
+| `/sessions/{id}/codex-requests/{request_id}/respond` | POST | Resolve approval/user-input structured request |
+| `/sessions/{id}/activity-actions` | GET | Provider-neutral codex activity projection |
+| `/admin/rollout-flags` | GET | Active codex rollout gate values |
 | `/sessions/{id}/watch` | POST | Watch for completion |
 | `/sessions/{id}` | DELETE | Kill session |
 | `/health` | GET | Server health check |
 
 Full API docs at `http://localhost:8420/docs` when running.
+
+Codex structured request errors:
+- `409 pending_structured_request` on `POST /sessions/{id}/input` when unresolved approval/input requests exist and rollout gate is enabled
+- `404 request_not_found` when `request_id` does not exist
+- `404 request_unavailable` when request is already orphaned/unavailable
+- `503` when a codex rollout gate disables the requested surface
 
 ---
 
@@ -325,10 +337,59 @@ monitor:
   idle_timeout: 300      # Notify after 5min idle
   poll_interval: 1.0
 
+codex_rollout:
+  enable_durable_events: true
+  enable_structured_requests: true
+  enable_observability_projection: true
+  enable_codex_tui: true
+
+codex_events:
+  db_path: "~/.local/share/claude-sessions/codex_events.db"
+  retention_max_events_per_session: 5000
+  retention_max_age_days: 14
+
+codex_requests:
+  db_path: "~/.local/share/claude-sessions/codex_requests.db"
+
+codex_observability:
+  db_path: "~/.local/share/claude-sessions/codex_observability.db"
+  retention_max_age_days: 14
+  retention_tool_events_per_session: 20000
+  retention_turn_events_per_session: 5000
+  payload_max_chars: 4000
+  prune_interval_seconds: 3600
+
 telegram:
   token: "BOT_TOKEN"           # From @BotFather
   allowed_chat_ids: [123456789] # Your chat ID
 ```
+
+### Codex-App Rollout Runbook
+
+1. Enable durable events first:
+   - `enable_durable_events: true`
+   - Verify: `curl -s localhost:8420/sessions/<id>/codex-events?since_seq=0&limit=5`
+2. Enable structured request control plane:
+   - `enable_structured_requests: true`
+   - Verify pending queue: `curl -s localhost:8420/sessions/<id>/codex-pending-requests`
+   - Verify input gate behavior (expect `pending_structured_request` when queue is non-empty)
+3. Enable observability projection:
+   - `enable_observability_projection: true`
+   - Verify: `sm children` and `sm tail <id>` show codex projected actions
+4. Enable TUI:
+   - `enable_codex_tui: true`
+   - Verify: `sm codex-tui <id>`
+
+Rollback and recovery:
+- Persistence degradation window:
+  - `GET /sessions/{id}/codex-events` returns `history_gap=true` with `gap_reason=persistence_error`
+  - Continue operating; recover by restoring DB path permissions/disk and watch for resumed persisted events
+- Restart/orphan handling:
+  - Pending requests from prior process generation are marked `orphaned` with `error_code=server_restarted`
+  - Inspect with `GET /sessions/{id}/codex-pending-requests?include_orphaned=true`
+- Immediate rollback:
+  - Set relevant `codex_rollout` flag(s) to `false` and restart service
+  - Existing sessions continue, but gated APIs/CLI paths return explicit `503`/disabled errors
 
 ---
 

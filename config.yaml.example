@@ -156,6 +156,36 @@ codex:
     branch_settle_seconds: 1.0       # Wait for branch picker to appear
     steer_delay_seconds: 5.0         # Wait before injecting steer text
 
+# Codex feature rollout gates (safe staged enablement)
+codex_rollout:
+  enable_durable_events: true
+  enable_structured_requests: true
+  enable_observability_projection: true
+  enable_codex_tui: true
+
+# Durable codex lifecycle event stream (for /codex-events + activity_state)
+codex_events:
+  db_path: "~/.local/share/claude-sessions/codex_events.db"
+  ring_size: 1000
+  retention_max_events_per_session: 5000
+  retention_max_age_days: 14
+  prune_every_writes: 200
+  payload_preview_chars: 1500
+  working_delta_window_seconds: 2.5
+
+# Structured request ledger (approval/user-input queue durability)
+codex_requests:
+  db_path: "~/.local/share/claude-sessions/codex_requests.db"
+
+# Codex observability DB + projection source
+codex_observability:
+  db_path: "~/.local/share/claude-sessions/codex_observability.db"
+  retention_max_age_days: 14
+  retention_tool_events_per_session: 20000
+  retention_turn_events_per_session: 5000
+  payload_max_chars: 4000
+  prune_interval_seconds: 3600
+
 child_agents:
   # Auto-completion detection
   auto_complete:

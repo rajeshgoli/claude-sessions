@@ -69,3 +69,29 @@ class TestCodexBypassConfig:
             sm = SessionManager(log_dir=tmpdir, state_file=f"{tmpdir}/state.json", config=config)
             assert sm.codex_cli_args == ["--dangerously-bypass-approvals-and-sandbox"]
             assert sm.codex_config.args == ["--custom-flag"]
+
+    def test_codex_rollout_defaults_enabled(self):
+        """All codex rollout feature flags default to enabled."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = SessionManager(log_dir=tmpdir, state_file=f"{tmpdir}/state.json", config={})
+            assert sm.is_codex_rollout_enabled("enable_durable_events") is True
+            assert sm.is_codex_rollout_enabled("enable_structured_requests") is True
+            assert sm.is_codex_rollout_enabled("enable_observability_projection") is True
+            assert sm.is_codex_rollout_enabled("enable_codex_tui") is True
+
+    def test_codex_rollout_override(self):
+        """codex_rollout overrides are applied from config."""
+        config = {
+            "codex_rollout": {
+                "enable_durable_events": False,
+                "enable_structured_requests": False,
+                "enable_observability_projection": True,
+                "enable_codex_tui": False,
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = SessionManager(log_dir=tmpdir, state_file=f"{tmpdir}/state.json", config=config)
+            assert sm.is_codex_rollout_enabled("enable_durable_events") is False
+            assert sm.is_codex_rollout_enabled("enable_structured_requests") is False
+            assert sm.is_codex_rollout_enabled("enable_observability_projection") is True
+            assert sm.is_codex_rollout_enabled("enable_codex_tui") is False

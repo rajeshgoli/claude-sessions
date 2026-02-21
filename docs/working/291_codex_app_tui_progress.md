@@ -475,10 +475,10 @@ Implementation tasks:
 - Document new endpoints, error codes, retention defaults, and restart behavior.
 - Add operator config keys with defaults (DB paths, retention window/caps, prune interval).
 - Add rollout flags for safe enablement:
-- enable durable events + activity state
-- enable structured request ledger and `/input` gating
-- enable codex observability ingestion/projection
-- add `sm codex-tui`
+- `codex_rollout.enable_durable_events` (durable events + event-driven activity state)
+- `codex_rollout.enable_structured_requests` (structured request ledger + `/input` gate)
+- `codex_rollout.enable_observability_projection` (observability projection for EM surfaces)
+- `codex_rollout.enable_codex_tui` (`sm codex-tui` operator surface)
 - Add rollback/runbook notes for persistence error windows and orphaned request handling.
 
 Test slice:

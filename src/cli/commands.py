@@ -1782,6 +1782,11 @@ def cmd_codex_tui(
         print("Error: sm codex-tui supports only provider=codex-app sessions", file=sys.stderr)
         return 1
 
+    rollout_flags = client.get_rollout_flags()
+    if rollout_flags is not None and not rollout_flags.get("enable_codex_tui", True):
+        print("Error: sm codex-tui is disabled by server rollout flag enable_codex_tui=false", file=sys.stderr)
+        return 1
+
     from .codex_tui import run_codex_tui
 
     return run_codex_tui(

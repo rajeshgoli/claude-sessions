@@ -792,6 +792,13 @@ class SessionManagerClient:
             return data.get("monitored", [])
         return None
 
+    def get_rollout_flags(self) -> Optional[dict]:
+        """Get server rollout feature flags."""
+        data, success, unavailable = self._request("GET", "/admin/rollout-flags")
+        if unavailable or not success or not data:
+            return None
+        return data.get("codex_rollout", {})
+
     def schedule_reminder(self, session_id: str, delay_seconds: int, message: str) -> Optional[dict]:
         """Schedule a one-shot self-reminder (calls POST /scheduler/remind)."""
         query = (

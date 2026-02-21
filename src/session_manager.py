@@ -57,6 +57,13 @@ class SessionManager:
 
         codex_config = self.config.get("codex", {})
         codex_app_config = self.config.get("codex_app_server", codex_config)
+        codex_rollout = self.config.get("codex_rollout", {})
+        self.codex_rollout_flags = {
+            "enable_durable_events": bool(codex_rollout.get("enable_durable_events", True)),
+            "enable_structured_requests": bool(codex_rollout.get("enable_structured_requests", True)),
+            "enable_observability_projection": bool(codex_rollout.get("enable_observability_projection", True)),
+            "enable_codex_tui": bool(codex_rollout.get("enable_codex_tui", True)),
+        }
 
         self.codex_cli_command = codex_config.get("command", "codex")
         self.codex_cli_args = codex_config.get("args", [])
@@ -1354,6 +1361,10 @@ class SessionManager:
             self.codex_observability_logger.log_turn_event(**kwargs)
         except Exception as exc:
             logger.warning("Failed to log codex turn event for %s: %s", kwargs.get("session_id"), exc)
+
+    def is_codex_rollout_enabled(self, flag_name: str) -> bool:
+        """Read codex rollout feature gate (defaults to True for unknown flags)."""
+        return bool(self.codex_rollout_flags.get(flag_name, True))
 
     def get_activity_state(self, session_or_id: Session | str) -> str:
         """Get computed activity state for API consumers."""
