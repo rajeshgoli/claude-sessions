@@ -1,4 +1,4 @@
-# sm#288 — Codex app-server as a first-class session citizen (user narrative)
+# sm#291 — Codex app-server as a first-class session citizen (user narrative)
 
 ## The user experience we are building
 
@@ -268,45 +268,45 @@ These tradeoffs are acceptable for this epic because the EM-critical capabilitie
 
 This should be delivered as an epic with sequenced tickets.
 
-1. `#288-A` Codex activity state + durable lifecycle event stream
+1. `#292` Codex activity state + durable lifecycle event stream
 - Add `activity_state` computation for `codex-app` sessions.
 - Add durable event persistence and cursor replay API (`since_seq` model).
 - Guarantee restart continuity for turn-level timeline with explicit `history_gap` contract.
-2. `#288-B` Structured request ledger + response APIs
+2. `#293` Structured request ledger + response APIs
 - Add persistent `codex_pending_requests` store and request lifecycle state machine.
 - Add `GET /sessions/{id}/codex-pending-requests` and `POST /sessions/{id}/codex-requests/{request_id}/respond`.
 - Implement idempotent response replay and restart orphaning policy.
 - Gate `POST /sessions/{id}/input` with explicit `409 pending_structured_request` when unresolved structured requests exist.
 - Remove legacy direct auto-response path in `codex_app_server.py` and route all structured responses through the ledger resolver.
-3. `#288-C` Codex observability DB + app-server ingestion
+3. `#294` Codex observability DB + app-server ingestion
 - Introduce `codex_observability.db` and logger.
 - Ingest `commandExecution` / `fileChange` / approval / delta / completion events from app-server.
 - Persist raw payload excerpts and normalized fields for analytics, including failure/interruption outcomes.
 - Implement retention/pruning and payload bounding as part of the initial schema rollout.
-4. `#288-D` Compatibility projection into EM surfaces
+4. `#295` Compatibility projection into EM surfaces
 - Add read adapter for `sm children`, `sm tail`, and parent wake summaries.
 - Ensure Codex sessions report recent actionable tool activity with command/file-change distinction.
-5. `#288-E` Input-capable `sm codex-tui`
+5. `#296` Input-capable `sm codex-tui`
 - Add attachable terminal TUI (runs in current terminal/tmux pane) with state panel, event feed, and in-pane composer.
 - Add pending-request queue and structured response actions for approval/user-input requests.
 - Route chat input through existing input endpoint and structured replies through codex-request response endpoint.
-6. `#288-F` Docs, rollout guardrails, and operational defaults
+6. `#297` Docs, rollout guardrails, and operational defaults
 - Document flags, retention, failure modes, and recovery behavior.
 - Add operator-facing examples for EM workflows and escalation paths.
 
 Dependency order:
 
-- `#288-A` and `#288-B` first (state/control plane correctness).
-- `#288-C` next (observability ingestion).
-- `#288-D` after observability schema is stable.
-- `#288-E` after control + data planes are stable.
-- `#288-F` final hardening and rollout guidance.
+- `#292` and `#293` first (state/control plane correctness).
+- `#294` next (observability ingestion).
+- `#295` after observability schema is stable.
+- `#296` after control + data planes are stable.
+- `#297` final hardening and rollout guidance.
 
 ## Implementation breakdown (concrete per-ticket scope)
 
 This section is the engineering breakdown needed to execute the epic without design drift.
 
-### `#288-A` Activity state + durable lifecycle event stream
+### `#292` Activity state + durable lifecycle event stream
 
 Primary code touch points:
 
@@ -338,7 +338,7 @@ Definition of done:
 - Restart does not lose timeline continuity for retained window.
 - `activity_state` for `codex-app` is event-driven, not tmux-driven.
 
-### `#288-B` Structured request ledger + response APIs
+### `#293` Structured request ledger + response APIs
 
 Primary code touch points:
 
@@ -373,7 +373,7 @@ Definition of done:
 - Structured requests can be listed and resolved via API only.
 - Normal chat input is explicitly blocked until structured backlog is cleared.
 
-### `#288-C` Codex observability DB + ingestion
+### `#294` Codex observability DB + ingestion
 
 Primary code touch points:
 
@@ -403,7 +403,7 @@ Definition of done:
 - Observability DB growth is bounded by policy.
 - Tool/turn outcomes are queryable with status fidelity.
 
-### `#288-D` Compatibility projection into EM surfaces
+### `#295` Compatibility projection into EM surfaces
 
 Primary code touch points:
 
@@ -429,7 +429,7 @@ Definition of done:
 
 - `sm children` and `sm tail` show meaningful recent Codex actions without tmux heuristics.
 
-### `#288-E` Input-capable `sm codex-tui`
+### `#296` Input-capable `sm codex-tui`
 
 Primary code touch points:
 
@@ -461,13 +461,13 @@ Definition of done:
 
 - Operator can manage progress + interventions from one terminal pane without fallback to raw API calls.
 
-### `#288-F` Docs, rollout guardrails, and defaults
+### `#297` Docs, rollout guardrails, and defaults
 
 Primary code/doc touch points:
 
 - `README.md`
 - `CLAUDE.md`
-- `docs/working/288_codex_app_tui_progress.md` (this doc)
+- `docs/working/291_codex_app_tui_progress.md` (this doc)
 - config loading in `src/main.py` / `src/session_manager.py` for new feature flags and DB paths
 
 Implementation tasks:
