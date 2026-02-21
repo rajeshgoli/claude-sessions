@@ -504,6 +504,19 @@ def create_app(
             activity_state=_get_activity_state(session),
         )
 
+    def _codex_rollout_enabled(flag_name: str) -> bool:
+        """Read codex rollout gate from SessionManager when available."""
+        sm = app.state.session_manager
+        if not sm:
+            return True
+        getter = getattr(sm, "is_codex_rollout_enabled", None)
+        if not callable(getter):
+            return True
+        try:
+            return bool(getter(flag_name))
+        except Exception:
+            return True
+
     @app.get("/")
     async def root():
         """Health check endpoint."""
@@ -1039,6 +1052,8 @@ def create_app(
             raise HTTPException(status_code=404, detail="Session not found")
         if getattr(session, "provider", "claude") != "codex-app":
             raise HTTPException(status_code=400, detail="codex-events supported only for provider=codex-app")
+        if not _codex_rollout_enabled("enable_durable_events"):
+            raise HTTPException(status_code=503, detail="codex durable events disabled by rollout flag")
 
         getter = getattr(app.state.session_manager, "get_codex_events", None)
         if not callable(getter):
@@ -1060,6 +1075,8 @@ def create_app(
             raise HTTPException(status_code=404, detail="Session not found")
         if getattr(session, "provider", "claude") != "codex-app":
             raise HTTPException(status_code=400, detail="activity actions supported only for provider=codex-app")
+        if not _codex_rollout_enabled("enable_observability_projection"):
+            raise HTTPException(status_code=503, detail="codex activity projection disabled by rollout flag")
 
         getter = getattr(app.state.session_manager, "get_codex_activity_actions", None)
         if not callable(getter):
@@ -1081,6 +1098,8 @@ def create_app(
             raise HTTPException(status_code=404, detail="Session not found")
         if getattr(session, "provider", "claude") != "codex-app":
             raise HTTPException(status_code=400, detail="codex requests supported only for provider=codex-app")
+        if not _codex_rollout_enabled("enable_structured_requests"):
+            raise HTTPException(status_code=503, detail="codex structured requests disabled by rollout flag")
 
         lister = getattr(app.state.session_manager, "list_codex_pending_requests", None)
         if not callable(lister):
@@ -1105,6 +1124,8 @@ def create_app(
             raise HTTPException(status_code=404, detail="Session not found")
         if getattr(session, "provider", "claude") != "codex-app":
             raise HTTPException(status_code=400, detail="codex requests supported only for provider=codex-app")
+        if not _codex_rollout_enabled("enable_structured_requests"):
+            raise HTTPException(status_code=503, detail="codex structured requests disabled by rollout flag")
 
         resolver = getattr(app.state.session_manager, "respond_codex_request", None)
         if not callable(resolver):
@@ -1316,7 +1337,8 @@ def create_app(
         if getattr(session, "provider", "claude") == "codex-app":
             has_pending = getattr(app.state.session_manager, "has_pending_codex_requests", None)
             oldest_pending = getattr(app.state.session_manager, "oldest_pending_codex_request", None)
-            if callable(has_pending) and has_pending(session_id):
+            structured_gate_enabled = _codex_rollout_enabled("enable_structured_requests")
+            if structured_gate_enabled and callable(has_pending) and has_pending(session_id):
                 summary = oldest_pending(session_id) if callable(oldest_pending) else None
                 raise HTTPException(
                     status_code=409,
@@ -2381,11 +2403,12 @@ Or continue working if not done yet."""
             children = all_descendants
 
         latest_action_getter = getattr(app.state.session_manager, "get_codex_latest_activity_action", None)
+        codex_projection_enabled = _codex_rollout_enabled("enable_observability_projection")
         children_payload = []
         for s in children:
             provider = getattr(s, "provider", "claude")
             activity_projection = None
-            if provider == "codex-app" and callable(latest_action_getter):
+            if provider == "codex-app" and codex_projection_enabled and callable(latest_action_getter):
                 activity_projection = latest_action_getter(s.id)
             children_payload.append(
                 {
@@ -2409,6 +2432,18 @@ Or continue working if not done yet."""
         return {
             "parent_session_id": parent_session_id,
             "children": children_payload,
+        }
+
+    @app.get("/admin/rollout-flags")
+    async def get_rollout_flags():
+        """Expose codex rollout feature gates for CLI and operator checks."""
+        return {
+            "codex_rollout": {
+                "enable_durable_events": _codex_rollout_enabled("enable_durable_events"),
+                "enable_structured_requests": _codex_rollout_enabled("enable_structured_requests"),
+                "enable_observability_projection": _codex_rollout_enabled("enable_observability_projection"),
+                "enable_codex_tui": _codex_rollout_enabled("enable_codex_tui"),
+            }
         }
 
     @app.post("/sessions/{target_session_id}/kill")

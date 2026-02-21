@@ -19,6 +19,7 @@ def mock_session_manager():
     mock.tmux.send_input_async = AsyncMock(return_value=True)
     mock.tmux.list_sessions = MagicMock(return_value=[])
     mock.message_queue_manager = None
+    mock.is_codex_rollout_enabled = MagicMock(return_value=True)
     mock._save_state = MagicMock()
     return mock
 
@@ -173,6 +174,23 @@ class TestSessionEndpoints:
         response = test_client.get("/sessions/test123/codex-events")
         assert response.status_code == 400
 
+    def test_get_codex_events_respects_rollout_flag(self, test_client, mock_session_manager):
+        """GET /sessions/{id}/codex-events returns 503 when durable events rollout is disabled."""
+        codex_session = Session(
+            id="codex123",
+            name="codex-app-codex123",
+            working_dir="/tmp/test",
+            provider="codex-app",
+            status=SessionStatus.RUNNING,
+        )
+        mock_session_manager.get_session.return_value = codex_session
+        mock_session_manager.is_codex_rollout_enabled.side_effect = (
+            lambda key: False if key == "enable_durable_events" else True
+        )
+
+        response = test_client.get("/sessions/codex123/codex-events")
+        assert response.status_code == 503
+
     def test_get_codex_activity_actions_success(self, test_client, mock_session_manager):
         """GET /sessions/{id}/activity-actions returns projected actions for codex-app."""
         codex_session = Session(
@@ -251,6 +269,23 @@ class TestSessionEndpoints:
         data = response.json()
         assert len(data["requests"]) == 1
         assert data["requests"][0]["request_id"] == "req-123"
+
+    def test_list_codex_pending_requests_respects_rollout_flag(self, test_client, mock_session_manager):
+        """GET /sessions/{id}/codex-pending-requests returns 503 when structured-request flag is disabled."""
+        codex_session = Session(
+            id="codexpending",
+            name="codex-app-codexpending",
+            working_dir="/tmp/test",
+            provider="codex-app",
+            status=SessionStatus.RUNNING,
+        )
+        mock_session_manager.get_session.return_value = codex_session
+        mock_session_manager.is_codex_rollout_enabled.side_effect = (
+            lambda key: False if key == "enable_structured_requests" else True
+        )
+
+        response = test_client.get("/sessions/codexpending/codex-pending-requests")
+        assert response.status_code == 503
 
     def test_respond_codex_request(self, test_client, mock_session_manager):
         """POST /sessions/{id}/codex-requests/{request_id}/respond resolves request."""
@@ -378,6 +413,40 @@ class TestSessionEndpoints:
         detail = response.json()["detail"]
         assert detail["error_code"] == "pending_structured_request"
         assert detail["pending_request"]["request_id"] == "req-1"
+
+    def test_send_input_codex_app_rollout_disabled_skips_pending_gate(self, test_client, mock_session_manager):
+        """POST /sessions/{id}/input does not enforce pending gate when structured-request rollout is disabled."""
+        codex_session = Session(
+            id="codexpend",
+            name="codex-app-codexpend",
+            working_dir="/tmp/test",
+            provider="codex-app",
+            status=SessionStatus.RUNNING,
+        )
+        mock_session_manager.get_session.return_value = codex_session
+        mock_session_manager.send_input = AsyncMock(return_value=DeliveryResult.DELIVERED)
+        mock_session_manager.has_pending_codex_requests.return_value = True
+        mock_session_manager.is_codex_rollout_enabled.side_effect = (
+            lambda key: False if key == "enable_structured_requests" else True
+        )
+
+        response = test_client.post("/sessions/codexpend/input", json={"text": "continue"})
+        assert response.status_code == 200
+        assert response.json()["status"] == "delivered"
+
+    def test_get_rollout_flags_endpoint(self, test_client, mock_session_manager):
+        """GET /admin/rollout-flags exposes current codex rollout gates."""
+        mock_session_manager.is_codex_rollout_enabled.side_effect = (
+            lambda key: key != "enable_codex_tui"
+        )
+
+        response = test_client.get("/admin/rollout-flags")
+        assert response.status_code == 200
+        data = response.json()["codex_rollout"]
+        assert data["enable_durable_events"] is True
+        assert data["enable_structured_requests"] is True
+        assert data["enable_observability_projection"] is True
+        assert data["enable_codex_tui"] is False
 
     def test_send_input_queued(self, test_client, mock_session_manager, sample_session):
         """POST /sessions/{id}/input returns queued status."""

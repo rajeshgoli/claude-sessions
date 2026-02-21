@@ -69,3 +69,10 @@ def test_respond_codex_request_success():
         {"decision": "accept"},
     )
 
+
+def test_get_rollout_flags_success():
+    client = _make_client()
+    payload = {"codex_rollout": {"enable_codex_tui": False}}
+    with patch.object(client, "_request", return_value=(payload, True, False)):
+        result = client.get_rollout_flags()
+    assert result == {"enable_codex_tui": False}

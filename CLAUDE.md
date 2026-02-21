@@ -44,6 +44,7 @@ sm kill <session>  # Kill session (children only)
 # Communication
 sm send <session> "msg"  # Send message to session
 sm output <session>      # View session output
+sm codex-tui <session>   # Codex-app live state/events/request UI
 
 # Agent coordination
 sm children        # List child sessions
@@ -62,6 +63,12 @@ claude:
 server:
   host: "0.0.0.0"
   port: 8420
+
+codex_rollout:
+  enable_durable_events: true
+  enable_structured_requests: true
+  enable_observability_projection: true
+  enable_codex_tui: true
 ```
 
 ## Development
