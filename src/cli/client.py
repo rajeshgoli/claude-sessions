@@ -756,16 +756,17 @@ class SessionManagerClient:
             return None
         return data if data else {"error": "Unknown error"}
 
-    def invalidate_cache(self, session_id: str) -> tuple[bool, bool]:
+    def invalidate_cache(self, session_id: str, arm_skip: bool = True) -> tuple[bool, bool]:
         """
         Invalidate server-side caches for a session after a CLI-driven clear.
 
         Returns:
             Tuple of (success, unavailable)
         """
+        query = f"arm_skip={'true' if arm_skip else 'false'}"
         data, success, unavailable = self._request(
             "POST",
-            f"/sessions/{session_id}/invalidate-cache",
+            f"/sessions/{session_id}/invalidate-cache?{query}",
         )
         return success, unavailable
 

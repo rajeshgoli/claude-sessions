@@ -265,7 +265,7 @@ class TestInvalidateCacheCanonicalReset:
         mock_sm.message_queue_manager = MagicMock()
         client = TestClient(create_app(session_manager=mock_sm))
 
-        resp = client.post(f"/sessions/{session.id}/invalidate-cache")
+        resp = client.post(f"/sessions/{session.id}/invalidate-cache?arm_skip=false")
 
         assert resp.status_code == 200
         assert session.role is None
@@ -273,6 +273,25 @@ class TestInvalidateCacheCanonicalReset:
         assert session.agent_status_text is None
         assert session.agent_status_at is None
         mock_sm._save_state.assert_called()
+
+    def test_invalidate_cache_arm_skip_true_does_not_reset_fields(self):
+        session = _make_session(provider="claude")
+        session.completion_status = CompletionStatus.COMPLETED
+        session.role = "engineer"
+        mock_sm = MagicMock()
+        mock_sm.sessions = {session.id: session}
+        mock_sm.get_session = MagicMock(return_value=session)
+        mock_sm._save_state = MagicMock()
+        mock_sm.message_queue_manager = MagicMock()
+        client = TestClient(create_app(session_manager=mock_sm))
+
+        resp = client.post(f"/sessions/{session.id}/invalidate-cache?arm_skip=true")
+
+        assert resp.status_code == 200
+        assert session.role == "engineer"
+        assert session.completion_status == CompletionStatus.COMPLETED
+        assert session.agent_status_text == "doing task A"
+        assert session.agent_status_at == datetime(2024, 1, 1, 12, 0, 0)
 
 
 # ---------------------------------------------------------------------------
