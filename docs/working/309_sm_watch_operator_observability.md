@@ -62,6 +62,14 @@ Current watch loop has no row-level expansion state. There is no mechanism to ex
 
 Watch client/server/database calls are synchronous today. If detail fetches run directly in the input/render loop, UI responsiveness degrades under slow API/DB reads.
 
+### 7) Detail data source is currently underspecified for configured DB paths
+
+Directly reading `tool_usage.db` from the TUI would couple watch to a local file path, but tool logging DB path is configurable. This is brittle and bypasses server contracts.
+
+### 8) codex-app observability actions are rollout-gated
+
+`/sessions/{id}/activity-actions` can be disabled by rollout flags. Watch needs explicit fallback behavior in both main-row `Last` and expanded detail sections to avoid repeated error churn.
+
 ## Proposed Solution
 
 ## 0) Operator-only availability policy
@@ -69,8 +77,10 @@ Watch client/server/database calls are synchronous today. If detail fetches run 
 Define `sm watch` as operator-only for now.
 
 Behavior:
-- In `src/cli/main.py`, reject `sm watch` when `CLAUDE_SESSION_MANAGER_ID` is set.
+- In `src/cli/main.py`, reject `sm watch` when `CLAUDE_SESSION_MANAGER_ID` is set (UX pre-check).
+- In `src/cli/commands.py` (`cmd_watch`), apply the same env check as the authoritative enforcement point for direct function calls/imported entrypoints.
 - Error text is explicit: watch is operator-only; run from a non-managed shell.
+- Return exit code `1` from `cmd_watch` when rejected.
 - No password flow in this ticket.
 
 Security note:
@@ -139,12 +149,14 @@ Field model for watch rows:
 Provider behavior:
 - Claude tmux: `last_tool_name` + age from `last_tool_call` when available
 - Codex tmux: show `n/a (no hooks)`
-- codex-app: `last_action_summary` (+ age from `last_action_at`) when available
+- codex-app: `last_action_summary` (+ age from `last_action_at`) when rollout projection is enabled and data exists
+- codex-app with projection disabled/unavailable: show `n/a (projection disabled)`
 - fallback: `-`
 
 To avoid N-per-row DB queries on every refresh:
 - update `session.last_tool_call` and `session.last_tool_name` in `hook_tool_use` on `PreToolUse`
-- expose codex-app compact summary/timestamp from existing projection getter
+- add `last_tool_name` to session model serialization/persistence
+- expose codex-app compact summary/timestamp from existing projection getter only when rollout flag is enabled
 - keep watch main list on `/sessions` data only
 
 ## 5) `Tab`-toggle per-session inline expansion
@@ -165,9 +177,10 @@ Detail content:
    - if `context_monitor_enabled == true`: show `tokens_used`
    - else: show `n/a (monitor off)`
 4. **Last 10 tool calls / actions**
-   - Claude tmux: query `tool_usage.db` for `PreToolUse` rows (`LIMIT 10`)
+   - Claude tmux: use `GET /sessions/{id}/tool-calls?limit=10` (server-backed; no direct SQLite reads in curses)
    - Codex tmux: show `n/a (no hooks)`
-   - codex-app: use `/activity-actions?limit=10`
+   - codex-app: use `/activity-actions?limit=10` when rollout projection is enabled
+   - codex-app with projection disabled/unavailable: show `n/a (projection disabled)`
 5. **Last 10 tail lines**
    - fetch `/sessions/{id}/output?lines=10`
    - for codex-app, enforce `lines` semantics server-side (tail last N lines of stored message)
@@ -178,6 +191,7 @@ Detail content:
 To keep keyboard/render responsive:
 - run detail fetches in a background worker (thread) with request queue + shared cache
 - curses loop only reads cached detail snapshots (never direct blocking I/O)
+- curses loop does not open SQLite connections directly
 - on expand/manual refresh (`r`), enqueue fetch work for affected sessions
 - worker uses bounded per-request timeouts and round-robin scheduling
 - stale cache remains visible on timeout/error
@@ -195,8 +209,13 @@ Because watch is operator-only, this is operator rename behavior in a single sur
 ## Implementation Approach
 
 ### `src/cli/main.py`
-- Add operator-only gate for `sm watch`:
+- Add operator-only gate for `sm watch` as pre-dispatch UX guard:
   - if `CLAUDE_SESSION_MANAGER_ID` is present, print explicit error and exit non-zero.
+
+### `src/cli/commands.py`
+- Add operator-only gate in `cmd_watch` as authoritative enforcement:
+  - if `CLAUDE_SESSION_MANAGER_ID` is present, print explicit error and return `1`.
+  - keep same rejection text as `main.py` path.
 
 ### `src/cli/watch_tui.py`
 - Introduce structured column row model and header rendering.
@@ -209,6 +228,7 @@ Because watch is operator-only, this is operator rename behavior in a single sur
 
 ### `src/cli/client.py`
 - Add `get_output(session_id, lines=10, timeout=...)` helper for tail panel.
+- Add `get_tool_calls(session_id, limit=10, timeout=...)` helper for watch detail panel.
 - Add timeout override parameters for watch detail helpers.
 
 ### `src/server.py`
@@ -220,6 +240,11 @@ Because watch is operator-only, this is operator rename behavior in a single sur
   - `tokens_used`
   - `context_monitor_enabled` (required bool)
 - Update `hook_tool_use` so `PreToolUse` refreshes in-memory `session.last_tool_call` + `session.last_tool_name`.
+- Add `GET /sessions/{id}/tool-calls?limit=10` for Claude tool-call tail (reads configured tool logger DB path server-side).
+- For codex-app projection-backed fields, return values only when rollout is enabled; otherwise surface nulls so watch can render explicit `n/a (projection disabled)`.
+
+### `src/models.py`
+- Add `last_tool_name: Optional[str]` to `Session` dataclass and include it in `to_dict`/`from_dict` for persistence consistency.
 
 ### `src/session_manager.py`
 - Update `capture_output()` for `provider=codex-app` to honor `lines` by returning only trailing N lines.
@@ -234,19 +259,26 @@ Because watch is operator-only, this is operator rename behavior in a single sur
   - `n` rename prompt/submit/cancel flows
   - render loop remains responsive while detail worker is slow
 
+### `tests/unit/test_cmd_watch.py`
+- Add coverage that direct `cmd_watch(...)` invocation is rejected when `CLAUDE_SESSION_MANAGER_ID` is present.
+
 ### `tests/unit/test_cli_main.py` (new) or equivalent main-dispatch test suite
 - Add coverage that managed-session invocation of `sm watch` is rejected when `CLAUDE_SESSION_MANAGER_ID` is present.
 
 ### `tests/integration/test_api_endpoints.py` (or equivalent server endpoint suite)
 - Add coverage for new watch observability fields in `/sessions`/`/sessions/{id}`.
 - Add coverage that `PreToolUse` updates `last_tool_call` and `last_tool_name`.
+- Add coverage for `/sessions/{id}/tool-calls?limit=10` (success + empty/fallback paths).
 - Add coverage that `/sessions/{id}/output?lines=N` returns bounded tail output for codex-app sessions.
+- Add coverage that codex projection disabled path yields stable fallback fields (no watch hard-failure contract).
 
 ## Test Plan
 
 ### Unit
 
 1. `sm watch` is rejected in managed shells (`CLAUDE_SESSION_MANAGER_ID` set).
+   - dispatch path (`main.py`)
+   - direct command path (`cmd_watch`)
 2. Watch row formatting with varied tree depths and long names remains aligned.
 3. Color fallback path works when terminal has no color support.
 4. Kill behavior:
@@ -260,8 +292,10 @@ Because watch is operator-only, this is operator rename behavior in a single sur
    - cancel/blank input leaves session name unchanged
 7. Session response model includes new watch fields and remains backward-compatible.
 8. `hook_tool_use` (`PreToolUse`) updates `last_tool_call` and `last_tool_name`.
-9. `/sessions/{id}/output?lines=N` honors line bounds for codex-app responses.
-10. Slow detail fetches do not freeze input/render loop (stale-cache fallback).
+9. `/sessions/{id}/tool-calls?limit=10` returns expected rows and gracefully handles unavailable/empty datasets.
+10. `/sessions/{id}/output?lines=N` honors line bounds for codex-app responses.
+11. Slow detail fetches do not freeze input/render loop (stale-cache fallback).
+12. codex-app projection-disabled mode renders explicit `n/a (projection disabled)` and does not spam errors.
 
 ### Manual
 
@@ -270,6 +304,7 @@ Because watch is operator-only, this is operator rename behavior in a single sur
    - `K` can kill selected session after confirmation.
 2. Run `sm watch` from within a managed agent session:
    - command exits with explicit operator-only error.
+   - verify both parser path and direct command invocation reject.
 3. Validate table readability:
    - headers present
    - columns aligned
@@ -290,13 +325,15 @@ Because watch is operator-only, this is operator rename behavior in a single sur
 1. **This is policy gating, not hard local-security isolation**
    - Mitigation: document operator-only intent; treat this as accidental-misuse prevention.
 2. **DB contention on `tool_usage.db`**
-   - Mitigation: query only expanded sessions; keep TTL cache.
+   - Mitigation: server-side endpoint + query only expanded sessions + TTL cache.
 3. **Terminal compatibility (colors/split panes)**
    - Mitigation: feature-detect color support and degrade to monochrome.
 4. **Context size ambiguity when monitoring disabled**
    - Mitigation: expose `context_monitor_enabled` as required bool and render explicit `n/a (monitor off)`.
 5. **UI stutter from detail fetch latency**
    - Mitigation: background worker, bounded timeouts, stale-cache render.
+6. **codex-app projection rollout can be disabled**
+   - Mitigation: explicit `n/a (projection disabled)` fallback for both main-row and expanded details.
 
 ## Ticket Classification
 
