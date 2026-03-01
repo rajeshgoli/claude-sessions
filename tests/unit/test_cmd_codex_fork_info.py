@@ -52,6 +52,5 @@ def test_cmd_codex_fork_info_json_output(capsys):
 def test_cmd_codex_fork_info_unavailable(capsys):
     client = _FakeClient(runtime=None, rollout=None)
     rc = commands.cmd_codex_fork_info(client)
-    assert rc == 2
-    assert "Session manager unavailable" in capsys.readouterr().err
-
+    assert rc == 1
+    assert "endpoint unavailable or incompatible" in capsys.readouterr().err

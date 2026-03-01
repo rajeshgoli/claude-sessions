@@ -1954,11 +1954,7 @@ def cmd_codex_fork_info(client: SessionManagerClient, json_output: bool = False)
 
     payload = client.get_codex_fork_runtime()
     if payload is None:
-        rollout_flags = client.get_rollout_flags()
-        if rollout_flags is None:
-            print("Error: Session manager unavailable", file=sys.stderr)
-            return 2
-        print("Error: Failed to fetch codex-fork runtime metadata", file=sys.stderr)
+        print("Error: Failed to fetch codex-fork runtime metadata (endpoint unavailable or incompatible)", file=sys.stderr)
         return 1
 
     if json_output:

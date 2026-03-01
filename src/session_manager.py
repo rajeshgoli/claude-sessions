@@ -124,7 +124,11 @@ class SessionManager:
         self.codex_fork_args = codex_fork_config.get("args", self.codex_cli_args)
         self.codex_fork_default_model = codex_fork_config.get("default_model", self.codex_default_model)
         self.codex_fork_event_schema_version = int(codex_fork_config.get("event_schema_version", 2))
-        self.codex_fork_artifact_ref = str(codex_fork_config.get("artifact_ref", "local-unpinned"))
+        raw_artifact_ref = codex_fork_config.get("artifact_ref", "local-unpinned")
+        artifact_ref = str(raw_artifact_ref).strip() if raw_artifact_ref is not None else ""
+        if not artifact_ref or artifact_ref.lower() in {"none", "null"}:
+            artifact_ref = "local-unpinned"
+        self.codex_fork_artifact_ref = artifact_ref
         self.codex_fork_artifact_release = str(codex_fork_config.get("artifact_release", "local"))
         artifact_platforms = codex_fork_config.get(
             "artifact_platforms",
