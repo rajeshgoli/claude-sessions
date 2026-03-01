@@ -2202,6 +2202,8 @@ class SessionManager:
             "other": 0,
         }
         for session in self.sessions.values():
+            if getattr(session, "status", SessionStatus.RUNNING) == SessionStatus.STOPPED:
+                continue
             provider = getattr(session, "provider", "claude")
             if provider in provider_counts:
                 provider_counts[provider] += 1

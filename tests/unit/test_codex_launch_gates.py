@@ -49,3 +49,26 @@ def test_codex_launch_gates_mark_unpinned_as_fail(tmp_path):
     payload = manager.get_codex_launch_gates()
     assert payload["gates"]["launch_artifact_pin"]["ok"] is False
 
+
+def test_codex_launch_gates_ignores_stopped_codex_app_sessions(tmp_path):
+    manager = SessionManager(
+        log_dir=str(tmp_path / "logs"),
+        state_file=str(tmp_path / "sessions.json"),
+        config={
+            "codex_rollout": {"provider_mapping_phase": "migration_window"},
+            "codex_fork": {"artifact_ref": "abc123"},
+        },
+    )
+    manager.sessions["stopped-app"] = Session(
+        id="stopped-app",
+        name="codex-app-stopped",
+        provider="codex-app",
+        working_dir=str(tmp_path),
+        tmux_session="",
+        log_file="",
+        status=SessionStatus.STOPPED,
+    )
+
+    payload = manager.get_codex_launch_gates()
+    assert payload["provider_counts"]["codex-app"] == 0
+    assert payload["gates"]["launch_codex_app_drain"]["ok"] is True
