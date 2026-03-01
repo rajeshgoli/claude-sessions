@@ -346,6 +346,7 @@ codex_rollout:
   enable_structured_requests: true
   enable_observability_projection: true
   enable_codex_tui: true
+  provider_mapping_phase: "pre_cutover"  # pre_cutover | migration_window | post_cutover
 
 codex_fork:
   artifact_release: "v0.1.0-sm"
@@ -426,6 +427,15 @@ Use `sm codex-rollout-gates` (or `--json`) to verify launch readiness gates:
 3. `launch_artifact_pin` (immutable codex-fork ref configured)
 4. `launch_codex_app_drain` (no active codex-app sessions)
 5. `launch_provider_mapping_phase` (`migration_window` or `post_cutover`)
+
+### Post-Cutover codex-app Retirement Semantics
+
+When `codex_rollout.provider_mapping_phase=post_cutover`:
+
+1. Existing codex-app sessions are retired with reason `provider_retired_codex_app`.
+2. New codex-app session creation/spawn paths are rejected by API policy.
+3. Mutating actions (`input`, structured `respond`, `clear`) return `410` with migration guidance.
+4. Pending codex requests and queued message artifacts are cleaned with explicit retirement reason.
 
 ---
 

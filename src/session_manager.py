@@ -11,13 +11,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Callable, Awaitable, Any
 
-from .models import ActivityState, DeliveryResult, NotificationEvent, ReviewConfig, Session, SessionStatus
+from .models import (
+    ActivityState,
+    CompletionStatus,
+    DeliveryResult,
+    NotificationEvent,
+    ReviewConfig,
+    Session,
+    SessionStatus,
+)
 from .tmux_controller import TmuxController
 from .codex_app_server import CodexAppServerSession, CodexAppServerConfig, CodexAppServerError
 from .codex_activity_projection import CodexActivityProjection
 from .codex_event_store import CodexEventStore
 from .codex_observability_logger import CodexObservabilityLogger
-from .codex_provider_policy import get_codex_app_policy, normalize_provider_mapping_phase
+from .codex_provider_policy import (
+    CODEX_APP_RETIRED_SESSION_REASON,
+    get_codex_app_policy,
+    normalize_provider_mapping_phase,
+)
 from .codex_request_ledger import CodexRequestLedger
 from .github_reviews import post_pr_review_comment, poll_for_codex_review, get_pr_repo_from_git
 
@@ -256,6 +268,7 @@ class SessionManager:
                     data = json.load(f)
                 legacy_codex_sessions: list[dict] = []
                 cleaned_sessions: list[dict] = []
+                retired_codex_app_sessions = False
                 for session_data in data.get("sessions", []):
                     raw_provider = session_data.get("provider")
                     raw_tmux_session = session_data.get("tmux_session")
@@ -279,6 +292,19 @@ class SessionManager:
                     session = Session.from_dict(session_data)
                     # Codex app-server sessions are restored without tmux
                     if session.provider == "codex-app":
+                        if (
+                            self.codex_provider_mapping_phase == "post_cutover"
+                            and not (
+                                session.status == SessionStatus.STOPPED
+                                and session.error_message == CODEX_APP_RETIRED_SESSION_REASON
+                            )
+                        ):
+                            self._retire_codex_app_session_state(
+                                session,
+                                reason=CODEX_APP_RETIRED_SESSION_REASON,
+                                cleanup_queue=False,
+                            )
+                            retired_codex_app_sessions = True
                         self.sessions[session.id] = session
                         logger.info(f"Restored codex app session: {session.name}")
                         continue
@@ -311,6 +337,8 @@ class SessionManager:
 
                 # Load EM topic continuity field (backward compat: missing = None)
                 self.em_topic = data.get("em_topic")
+                if retired_codex_app_sessions:
+                    self._save_state()
 
                 return True
             except Exception as e:
@@ -2251,6 +2279,75 @@ class SessionManager:
             "codex_fork_runtime": runtime,
             "codex_provider_policy": policy,
         }
+
+    def _retire_codex_app_session_state(
+        self,
+        session: Session,
+        reason: str = CODEX_APP_RETIRED_SESSION_REASON,
+        cleanup_queue: bool = True,
+    ) -> dict[str, Any]:
+        """Transition a codex-app session to retired state with cleanup semantics."""
+        session_id = session.id
+        codex_session = self.codex_sessions.pop(session_id, None)
+        if codex_session:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(codex_session.close())
+            except RuntimeError:
+                asyncio.run(codex_session.close())
+
+        self.codex_request_ledger.orphan_pending_for_session(session_id, error_code=reason)
+
+        queue_messages_cleared = 0
+        if cleanup_queue and self.message_queue_manager:
+            retire_queue = getattr(self.message_queue_manager, "retire_session_queue", None)
+            if callable(retire_queue):
+                queue_messages_cleared = int(retire_queue(session_id, reason))
+
+        for key in [k for k in self._codex_item_started_at if k[0] == session_id]:
+            self._codex_item_started_at.pop(key, None)
+        self.codex_turns_in_flight.discard(session_id)
+        self.codex_active_turn_ids.pop(session_id, None)
+        self.codex_last_delta_at.pop(session_id, None)
+        self.codex_wait_states.pop(session_id, None)
+
+        session.status = SessionStatus.STOPPED
+        session.completion_status = CompletionStatus.KILLED
+        session.completion_message = reason
+        session.error_message = reason
+        session.last_activity = datetime.now()
+        with contextlib.suppress(Exception):
+            self.codex_event_store.append_event(
+                session_id=session_id,
+                event_type="codex_app_retired",
+                payload={
+                    "reason": reason,
+                    "queue_messages_cleared": queue_messages_cleared,
+                },
+            )
+        return {"queue_messages_cleared": queue_messages_cleared}
+
+    def retire_codex_app_sessions(self, reason: str = CODEX_APP_RETIRED_SESSION_REASON) -> int:
+        """Retire all known codex-app sessions deterministically."""
+        retired = 0
+        for session in self.sessions.values():
+            if session.provider != "codex-app":
+                continue
+            is_already_retired = (
+                session.status == SessionStatus.STOPPED
+                and session.error_message == reason
+            )
+            if is_already_retired:
+                if self.message_queue_manager:
+                    retire_queue = getattr(self.message_queue_manager, "retire_session_queue", None)
+                    if callable(retire_queue):
+                        retire_queue(session.id, reason)
+                continue
+            self._retire_codex_app_session_state(session, reason=reason, cleanup_queue=True)
+            retired += 1
+        if retired:
+            self._save_state()
+        return retired
 
     def get_activity_state(self, session_or_id: Session | str) -> str:
         """Get computed activity state for API consumers."""

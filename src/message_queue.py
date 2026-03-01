@@ -694,6 +694,27 @@ class MessageQueueManager:
         )
         logger.info(f"Cleaned up {count} pending message(s) for non-existent session {session_id}")
 
+    def retire_session_queue(self, session_id: str, reason: str) -> int:
+        """Delete pending messages and scheduled tasks for a retired session."""
+        rows = self._execute_query(
+            "SELECT COUNT(*) FROM message_queue WHERE target_session_id = ? AND delivered_at IS NULL",
+            (session_id,),
+        )
+        count = rows[0][0] if rows else 0
+        self._execute(
+            "DELETE FROM message_queue WHERE target_session_id = ? AND delivered_at IS NULL",
+            (session_id,),
+        )
+        self.cancel_remind(session_id)
+        self.cancel_parent_wake(session_id)
+        logger.info(
+            "Retired session queue for %s: removed %s pending message(s), reason=%s",
+            session_id,
+            count,
+            reason,
+        )
+        return count
+
     def cancel_context_monitor_messages_from(self, sender_session_id: str) -> int:
         """Cancel undelivered context-monitor notifications from sender_session_id.
 

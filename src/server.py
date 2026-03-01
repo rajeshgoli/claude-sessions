@@ -15,6 +15,8 @@ from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .codex_provider_policy import (
+    CODEX_APP_RETIRED_SESSION_ERROR,
+    CODEX_APP_RETIRED_SESSION_REASON,
     REMOVED_CODEX_SERVER_ENTRYPOINT_MESSAGE,
     get_codex_app_policy,
 )
@@ -500,6 +502,15 @@ def create_app(
     # Wire _app back-reference so _execute_handoff can clear server-side caches (#196)
     if session_manager:
         session_manager._app = app
+        policy_getter = getattr(session_manager, "get_codex_provider_policy", None)
+        if callable(policy_getter):
+            policy = policy_getter()
+            if isinstance(policy, dict) and policy.get("phase") == "post_cutover":
+                retire = getattr(session_manager, "retire_codex_app_sessions", None)
+                if callable(retire):
+                    retired_count = int(retire(reason=CODEX_APP_RETIRED_SESSION_REASON))
+                    if retired_count:
+                        logger.info("Retired %s codex-app session(s) for post-cutover policy", retired_count)
 
     def _fallback_activity_state(session: Session) -> str:
         if session.status == SessionStatus.STOPPED:
@@ -626,6 +637,24 @@ def create_app(
         if isinstance(policy, dict):
             return policy
         return get_codex_app_policy()
+
+    def _codex_app_create_rejection(provider: str) -> Optional[str]:
+        """Return provider-mapping rejection text for codex-app creation paths."""
+        if provider != "codex-app":
+            return None
+        policy = _codex_provider_policy()
+        if policy.get("allow_create", True):
+            return None
+        return str(policy.get("rejection_error") or "provider=codex-app is not available")
+
+    def _codex_app_mutation_rejection(session: Session) -> Optional[str]:
+        """Return post-cutover retirement rejection for mutating codex-app actions."""
+        if getattr(session, "provider", "claude") != "codex-app":
+            return None
+        policy = _codex_provider_policy()
+        if policy.get("phase") != "post_cutover":
+            return None
+        return CODEX_APP_RETIRED_SESSION_ERROR
 
     @app.get("/")
     async def root():
@@ -1057,6 +1086,9 @@ def create_app(
             raise HTTPException(status_code=503, detail="Session manager not configured")
 
         provider = _normalize_provider(request.provider)
+        creation_rejection = _codex_app_create_rejection(provider)
+        if creation_rejection:
+            raise HTTPException(status_code=400, detail=creation_rejection)
         session = await app.state.session_manager.create_session(
             working_dir=request.working_dir,
             name=request.name,
@@ -1088,6 +1120,9 @@ def create_app(
 
         # Create session using config settings
         provider = _normalize_provider(provider)
+        creation_rejection = _codex_app_create_rejection(provider)
+        if creation_rejection:
+            raise HTTPException(status_code=400, detail=creation_rejection)
         session = await app.state.session_manager.create_session(
             working_dir=working_dir,
             telegram_chat_id=None,  # No Telegram association
@@ -1234,6 +1269,15 @@ def create_app(
             raise HTTPException(status_code=404, detail="Session not found")
         if getattr(session, "provider", "claude") != "codex-app":
             raise HTTPException(status_code=400, detail="codex requests supported only for provider=codex-app")
+        mutation_rejection = _codex_app_mutation_rejection(session)
+        if mutation_rejection:
+            raise HTTPException(
+                status_code=410,
+                detail={
+                    "error_code": CODEX_APP_RETIRED_SESSION_REASON,
+                    "message": mutation_rejection,
+                },
+            )
         if not _codex_rollout_enabled("enable_structured_requests"):
             raise HTTPException(status_code=503, detail="codex structured requests disabled by rollout flag")
 
@@ -1498,6 +1542,16 @@ def create_app(
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
+        mutation_rejection = _codex_app_mutation_rejection(session)
+        if mutation_rejection:
+            raise HTTPException(
+                status_code=410,
+                detail={
+                    "error_code": CODEX_APP_RETIRED_SESSION_REASON,
+                    "message": mutation_rejection,
+                },
+            )
+
         if getattr(session, "provider", "claude") == "codex-app":
             has_pending = getattr(app.state.session_manager, "has_pending_codex_requests", None)
             oldest_pending = getattr(app.state.session_manager, "oldest_pending_codex_request", None)
@@ -1580,6 +1634,15 @@ def create_app(
         session = app.state.session_manager.get_session(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
+        mutation_rejection = _codex_app_mutation_rejection(session)
+        if mutation_rejection:
+            raise HTTPException(
+                status_code=410,
+                detail={
+                    "error_code": CODEX_APP_RETIRED_SESSION_REASON,
+                    "message": mutation_rejection,
+                },
+            )
 
         success = await app.state.session_manager.clear_session(session_id, request.prompt)
         if not success:
@@ -2434,6 +2497,10 @@ Or continue working if not done yet."""
 
         # Spawn child session
         provider = _normalize_provider(request.provider) if request.provider else None
+        selected_provider = provider or getattr(parent_session, "provider", "claude")
+        creation_rejection = _codex_app_create_rejection(selected_provider)
+        if creation_rejection:
+            raise HTTPException(status_code=400, detail=creation_rejection)
         child_session = await app.state.session_manager.spawn_child_session(
             parent_session_id=request.parent_session_id,
             prompt=request.prompt,
