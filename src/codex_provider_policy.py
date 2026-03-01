@@ -17,16 +17,16 @@ CODEX_APP_DEPRECATION_WARNING = (
     "(or sm codex --provider codex-fork)."
 )
 CODEX_APP_MIGRATION_WINDOW_REJECTION = (
-    "provider=codex-app is deprecated; use sm codex (default codex-fork) "
-    "or --provider codex for rollback."
+    "provider=codex-app is deprecated; use sm codex-fork "
+    "(recommended) or sm codex for rollback."
 )
 CODEX_APP_POST_CUTOVER_REJECTION = (
-    "provider=codex-app has been removed; use sm codex (provider=codex-fork)."
+    "provider=codex-app has been removed; use sm codex-fork."
 )
 
 REMOVED_CODEX_SERVER_ENTRYPOINT_MESSAGE = (
     "sm codex-server has been removed; use sm codex-app during the deprecation "
-    "window or sm codex (default codex-fork)."
+    "window or sm codex-fork."
 )
 
 
@@ -63,4 +63,3 @@ def get_codex_app_policy(phase: Any = None) -> dict[str, Any]:
         "warning": CODEX_APP_DEPRECATION_WARNING,
         "rejection_error": CODEX_APP_MIGRATION_WINDOW_REJECTION,
     }
-
