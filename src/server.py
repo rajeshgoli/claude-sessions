@@ -1243,15 +1243,6 @@ def create_app(
             raise HTTPException(status_code=404, detail="Session not found")
         if getattr(session, "provider", "claude") != "codex-app":
             raise HTTPException(status_code=400, detail="codex requests supported only for provider=codex-app")
-        mutation_rejection = _codex_app_mutation_rejection(session)
-        if mutation_rejection:
-            raise HTTPException(
-                status_code=410,
-                detail={
-                    "error_code": CODEX_APP_RETIRED_SESSION_REASON,
-                    "message": mutation_rejection,
-                },
-            )
         if not _codex_rollout_enabled("enable_structured_requests"):
             raise HTTPException(status_code=503, detail="codex structured requests disabled by rollout flag")
 
@@ -1278,6 +1269,15 @@ def create_app(
             raise HTTPException(status_code=404, detail="Session not found")
         if getattr(session, "provider", "claude") != "codex-app":
             raise HTTPException(status_code=400, detail="codex requests supported only for provider=codex-app")
+        mutation_rejection = _codex_app_mutation_rejection(session)
+        if mutation_rejection:
+            raise HTTPException(
+                status_code=410,
+                detail={
+                    "error_code": CODEX_APP_RETIRED_SESSION_REASON,
+                    "message": mutation_rejection,
+                },
+            )
         if not _codex_rollout_enabled("enable_structured_requests"):
             raise HTTPException(status_code=503, detail="codex structured requests disabled by rollout flag")
 

@@ -66,3 +66,28 @@ def test_post_cutover_load_retires_restored_codex_app_session(tmp_path):
     assert restored.status == SessionStatus.STOPPED
     assert restored.error_message == "provider_retired_codex_app"
 
+
+def test_retire_codex_app_sessions_cleans_queue_for_already_retired(tmp_path):
+    manager = SessionManager(
+        log_dir=str(tmp_path / "logs"),
+        state_file=str(tmp_path / "sessions.json"),
+        config={},
+    )
+    queue = _FakeQueueManager()
+    manager.message_queue_manager = queue
+
+    session = Session(
+        id="retired001",
+        name="codex-app-retired001",
+        provider="codex-app",
+        working_dir=str(tmp_path),
+        tmux_session="",
+        log_file="",
+        status=SessionStatus.STOPPED,
+    )
+    session.error_message = "provider_retired_codex_app"
+    manager.sessions[session.id] = session
+
+    retired = manager.retire_codex_app_sessions(reason="provider_retired_codex_app")
+    assert retired == 0
+    assert queue.calls == [(session.id, "provider_retired_codex_app")]

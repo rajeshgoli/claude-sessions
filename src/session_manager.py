@@ -2328,6 +2328,10 @@ class SessionManager:
                 and session.error_message == reason
             )
             if is_already_retired:
+                if self.message_queue_manager:
+                    retire_queue = getattr(self.message_queue_manager, "retire_session_queue", None)
+                    if callable(retire_queue):
+                        retire_queue(session.id, reason)
                 continue
             self._retire_codex_app_session_state(session, reason=reason, cleanup_queue=True)
             retired += 1
