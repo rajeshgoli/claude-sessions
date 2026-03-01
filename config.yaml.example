@@ -162,6 +162,8 @@ codex_rollout:
   enable_structured_requests: true
   enable_observability_projection: true
   enable_codex_tui: true
+  # pre_cutover | migration_window | post_cutover
+  provider_mapping_phase: "pre_cutover"
 
 # Codex fork runtime metadata + pinning contract
 codex_fork:

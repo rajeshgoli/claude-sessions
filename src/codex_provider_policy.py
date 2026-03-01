@@ -23,6 +23,10 @@ CODEX_APP_MIGRATION_WINDOW_REJECTION = (
 CODEX_APP_POST_CUTOVER_REJECTION = (
     "provider=codex-app has been removed; use sm codex-fork."
 )
+CODEX_APP_RETIRED_SESSION_REASON = "provider_retired_codex_app"
+CODEX_APP_RETIRED_SESSION_ERROR = (
+    "provider=codex-app session is retired (provider_retired_codex_app); use provider=codex-fork."
+)
 
 REMOVED_CODEX_SERVER_ENTRYPOINT_MESSAGE = (
     "sm codex-server has been removed; use sm codex-app during the deprecation "
