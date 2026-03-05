@@ -313,7 +313,11 @@ def parse_dispatch_args(argv: list[str]) -> tuple:
                 dynamic_params[key] = value
                 i += 1
             elif i + 1 < len(remaining):
-                dynamic_params[raw] = remaining[i + 1]
+                next_token = remaining[i + 1]
+                if next_token.startswith("--"):
+                    print(f"Error: Flag '--{raw}' requires a value", file=sys.stderr)
+                    sys.exit(1)
+                dynamic_params[raw] = next_token
                 i += 2
             else:
                 print(f"Error: Flag '--{raw}' requires a value", file=sys.stderr)
