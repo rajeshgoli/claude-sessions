@@ -279,7 +279,7 @@ def test_codex_fork_non_transition_events_do_not_mark_idle_again():
     assert calls["active"] == 0
 
 
-def test_codex_fork_marks_queue_on_real_state_transitions_only():
+def test_codex_fork_marks_queue_idle_on_real_transitions_and_active_on_running_events():
     manager = _make_manager()
     session = Session(
         id="cf5",
@@ -326,7 +326,7 @@ def test_codex_fork_marks_queue_on_real_state_transitions_only():
         },
     )
 
-    assert calls["active"] == 1
+    assert calls["active"] == 2
     assert calls["idle"] == 1
 
 
@@ -369,3 +369,40 @@ def test_codex_fork_non_transition_event_does_not_consume_stop_notify():
 
     # Stop notification must remain armed until a real idle transition.
     assert state.stop_notify_sender_id == "em-parent"
+
+
+def test_codex_fork_non_transition_running_event_reactivates_stale_queue_state():
+    manager = _make_manager()
+    manager.message_queue_manager = MessageQueueManager(
+        session_manager=manager,
+        db_path=f"{manager._tmpdir.name}/mq_test.db",
+        config={},
+        notifier=None,
+    )
+    session = Session(
+        id="cf7",
+        name="codex-fork-cf7",
+        working_dir="/tmp",
+        provider="codex-fork",
+        status=SessionStatus.RUNNING,
+    )
+    manager.sessions[session.id] = session
+
+    manager.codex_fork_lifecycle[session.id] = {"state": "running", "updated_at": datetime.now().isoformat()}
+    manager.codex_fork_last_seq[session.id] = 40
+    manager.codex_fork_turns_in_flight.add(session.id)
+
+    state = manager.message_queue_manager._get_or_create_state(session.id)
+    state.is_idle = True
+
+    manager.ingest_codex_fork_event(
+        session.id,
+        {
+            "event_type": "turn_delta",
+            "seq": 41,
+            "session_epoch": 1,
+            "payload": {},
+        },
+    )
+
+    assert manager.message_queue_manager.is_session_idle(session.id) is False
