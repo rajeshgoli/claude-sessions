@@ -554,9 +554,12 @@ class SessionManager:
             session.last_activity = now
 
             if self.message_queue_manager:
-                if state in ("running", "waiting_on_approval", "waiting_on_user_input"):
+                # Reassert active on every active event to repair stale idle flags
+                # from recovery/interrupt paths. Idle marking stays transition-gated
+                # so idle replays do not consume stop-notify state (issue #341).
+                if state not in ("idle", "shutdown", "error"):
                     self.message_queue_manager.mark_session_active(session_id)
-                else:
+                elif previous_state != state:
                     self.message_queue_manager.mark_session_idle(session_id)
 
             if session.status != status_before:
