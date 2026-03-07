@@ -252,3 +252,64 @@ def test_load_state_backfills_durable_topic_registry(tmp_path):
     saved = json.loads(registry_file.read_text())
     assert saved["topics"][0]["thread_id"] == 24680
     assert manager.get_session("dead1234") is None
+
+
+def test_load_state_preserves_deleted_topic_tombstone(tmp_path):
+    state_file = tmp_path / "sessions.json"
+    registry_file = tmp_path / "telegram_topics.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "sessions": [
+                    {
+                        "id": "dead1234",
+                        "name": "claude-dead1234",
+                        "working_dir": "/tmp",
+                        "tmux_session": "claude-dead1234",
+                        "log_file": "/tmp/dead1234.log",
+                        "status": "idle",
+                        "created_at": "2026-03-06T10:00:00",
+                        "last_activity": "2026-03-06T10:00:00",
+                        "telegram_chat_id": -1003506774897,
+                        "telegram_thread_id": 24680,
+                    }
+                ]
+            }
+        )
+    )
+    registry_file.write_text(
+        json.dumps(
+            {
+                "topics": [
+                    {
+                        "session_id": "dead1234",
+                        "chat_id": -1003506774897,
+                        "thread_id": 24680,
+                        "tmux_session": "claude-dead1234",
+                        "provider": "claude",
+                        "created_at": "2026-03-06T10:00:00",
+                        "last_seen_at": "2026-03-06T10:00:00",
+                        "deleted_at": "2026-03-06T11:00:00",
+                        "is_em_topic": False,
+                    }
+                ]
+            }
+        )
+    )
+    config = {
+        "telegram": {
+            "default_forum_chat_id": -1003506774897,
+            "topic_registry": {"path": str(registry_file)},
+        }
+    }
+
+    with patch("src.session_manager.TmuxController") as mock_tmux_cls:
+        mock_tmux_cls.return_value.session_exists.return_value = False
+        manager = SessionManager(
+            log_dir=str(tmp_path),
+            state_file=str(state_file),
+            config=config,
+        )
+
+    record = manager.telegram_topic_registry[(-1003506774897, 24680)]
+    assert record.deleted_at is not None

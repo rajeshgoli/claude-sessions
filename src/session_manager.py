@@ -335,6 +335,8 @@ class SessionManager:
 
         key = (chat_id, thread_id)
         existing = self.telegram_topic_registry.get(key)
+        if existing is not None and existing.deleted_at is not None:
+            return
         now = datetime.now()
         created_at = existing.created_at if existing else session.created_at
         record = TelegramTopicRecord(
