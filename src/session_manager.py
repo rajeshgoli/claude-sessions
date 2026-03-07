@@ -19,6 +19,7 @@ from .models import (
     ReviewConfig,
     Session,
     SessionStatus,
+    TelegramTopicRecord,
 )
 from .tmux_controller import TmuxController
 from .codex_app_server import CodexAppServerSession, CodexAppServerConfig, CodexAppServerError
@@ -104,7 +105,14 @@ class SessionManager:
 
         # Telegram topic auto-sync
         self.orphaned_topics: list[tuple[int, int]] = []  # (chat_id, thread_id) from dead sessions
-        self.default_forum_chat_id: Optional[int] = self.config.get("telegram", {}).get("default_forum_chat_id")
+        telegram_config = self.config.get("telegram", {})
+        self.default_forum_chat_id: Optional[int] = telegram_config.get("default_forum_chat_id")
+        topic_registry_config = telegram_config.get("topic_registry", {})
+        self.telegram_topic_registry_path = Path(
+            topic_registry_config.get("path", "~/.local/share/claude-sessions/telegram_topics.json")
+        ).expanduser()
+        self.telegram_topic_registry_path.parent.mkdir(parents=True, exist_ok=True)
+        self.telegram_topic_registry: dict[tuple[int, int], TelegramTopicRecord] = {}
         self._topic_creator: Optional[Callable[..., Awaitable[Optional[int]]]] = None
 
         codex_config = self.config.get("codex", {})
@@ -252,8 +260,144 @@ class SessionManager:
         # Format: {"chat_id": int, "thread_id": int} or None
         self.em_topic: Optional[dict] = None
 
+        self._load_telegram_topic_registry()
+
         # Load existing sessions from state file
         self._load_state()
+
+    def _load_telegram_topic_registry(self) -> bool:
+        """Load the durable Telegram topic registry from disk."""
+        if not self.telegram_topic_registry_path.exists():
+            return True
+
+        try:
+            with open(self.telegram_topic_registry_path) as f:
+                data = json.load(f)
+
+            self.telegram_topic_registry = {}
+            for item in data.get("topics", []):
+                record = TelegramTopicRecord.from_dict(item)
+                self.telegram_topic_registry[(record.chat_id, record.thread_id)] = record
+            return True
+        except Exception as e:
+            logger.error(
+                "CRITICAL: Failed to load Telegram topic registry from %s: %s",
+                self.telegram_topic_registry_path,
+                e,
+            )
+            return False
+
+    def _save_telegram_topic_registry(self) -> bool:
+        """Persist the durable Telegram topic registry using atomic file replacement."""
+        try:
+            data = {
+                "topics": [
+                    record.to_dict()
+                    for _, record in sorted(
+                        self.telegram_topic_registry.items(),
+                        key=lambda item: (item[0][0], item[0][1]),
+                    )
+                ]
+            }
+            path = self.telegram_topic_registry_path
+            temp_file = path.with_suffix(".tmp")
+
+            with open(temp_file, "w") as f:
+                json.dump(data, f, indent=2)
+
+            temp_file.rename(path)
+            return True
+        except Exception as e:
+            logger.error(
+                "CRITICAL: Failed to save Telegram topic registry to %s: %s",
+                self.telegram_topic_registry_path,
+                e,
+            )
+            try:
+                temp_file = self.telegram_topic_registry_path.with_suffix(".tmp")
+                if temp_file.exists():
+                    temp_file.unlink()
+            except Exception:
+                pass
+            return False
+
+    def _upsert_telegram_topic_record(
+        self,
+        session: Session,
+        chat_id: int,
+        thread_id: int,
+        *,
+        persist: bool = True,
+    ) -> None:
+        """Create or refresh a durable Telegram topic registry entry."""
+        if not chat_id or not thread_id:
+            return
+
+        key = (chat_id, thread_id)
+        existing = self.telegram_topic_registry.get(key)
+        if existing is not None and existing.deleted_at is not None:
+            return
+        now = datetime.now()
+        created_at = existing.created_at if existing else session.created_at
+        record = TelegramTopicRecord(
+            session_id=session.id,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            tmux_session=session.tmux_session or (existing.tmux_session if existing else None),
+            provider=session.provider,
+            created_at=created_at,
+            last_seen_at=now,
+            deleted_at=None,
+            is_em_topic=session.is_em or (existing.is_em_topic if existing else False),
+        )
+        changed = existing != record
+        self.telegram_topic_registry[key] = record
+        if changed and persist:
+            self._save_telegram_topic_registry()
+
+    def mark_telegram_topic_deleted(
+        self,
+        chat_id: int,
+        thread_id: int,
+        *,
+        session: Optional[Session] = None,
+        persist: bool = True,
+    ) -> None:
+        """Mark a durable topic registry entry as deleted."""
+        key = (chat_id, thread_id)
+        record = self.telegram_topic_registry.get(key)
+        if record is None and session is not None:
+            self._upsert_telegram_topic_record(session, chat_id, thread_id, persist=False)
+            record = self.telegram_topic_registry.get(key)
+        if record is None or record.deleted_at is not None:
+            return
+
+        record.deleted_at = datetime.now()
+        if session is not None:
+            record.session_id = session.id
+            record.tmux_session = session.tmux_session
+            record.provider = session.provider
+            record.is_em_topic = record.is_em_topic or session.is_em
+        record.last_seen_at = datetime.now()
+        if persist:
+            self._save_telegram_topic_registry()
+
+    def get_active_telegram_topic_record(
+        self,
+        session_id: str,
+        chat_id: Optional[int] = None,
+    ) -> Optional[TelegramTopicRecord]:
+        """Return the most recently seen active topic record for a session."""
+        matches = [
+            record
+            for record in self.telegram_topic_registry.values()
+            if record.session_id == session_id
+            and record.deleted_at is None
+            and (chat_id is None or record.chat_id == chat_id)
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda record: record.last_seen_at)
 
     def _load_state(self) -> bool:
         """
@@ -270,6 +414,7 @@ class SessionManager:
                 legacy_codex_sessions: list[dict] = []
                 cleaned_sessions: list[dict] = []
                 retired_codex_app_sessions = False
+                registry_backfilled = False
                 for session_data in data.get("sessions", []):
                     raw_provider = session_data.get("provider")
                     raw_tmux_session = session_data.get("tmux_session")
@@ -291,6 +436,16 @@ class SessionManager:
                         continue
                     cleaned_sessions.append(session_data)
                     session = Session.from_dict(session_data)
+                    if session.telegram_chat_id and session.telegram_thread_id:
+                        key = (session.telegram_chat_id, session.telegram_thread_id)
+                        if key not in self.telegram_topic_registry:
+                            registry_backfilled = True
+                        self._upsert_telegram_topic_record(
+                            session,
+                            session.telegram_chat_id,
+                            session.telegram_thread_id,
+                            persist=False,
+                        )
                     # Codex app-server sessions are restored without tmux
                     if session.provider == "codex-app":
                         if (
@@ -337,6 +492,8 @@ class SessionManager:
                             )
                 if legacy_codex_sessions:
                     self._rewrite_state_raw(cleaned_sessions)
+                if registry_backfilled:
+                    self._save_telegram_topic_registry()
 
                 # Load EM topic continuity field (backward compat: missing = None)
                 self.em_topic = data.get("em_topic")
@@ -1143,6 +1300,11 @@ class SessionManager:
                 )
                 if thread_id:
                     session.telegram_thread_id = thread_id
+                    self._upsert_telegram_topic_record(
+                        session,
+                        session.telegram_chat_id,
+                        thread_id,
+                    )
                     self._save_state()  # Persist IMMEDIATELY — minimize race window
                     changed = False     # Already saved; prevent redundant outer save
                     logger.info(
@@ -1314,12 +1476,14 @@ class SessionManager:
                 session.error_message = error_message
             self._save_state()
 
-    def update_telegram_thread(self, session_id: str, chat_id: int, message_id: int):
+    def update_telegram_thread(self, session_id: str, chat_id: int, message_id: Optional[int]):
         """Associate a Telegram thread with a session."""
         session = self.sessions.get(session_id)
         if session:
             session.telegram_chat_id = chat_id
             session.telegram_thread_id = message_id
+            if message_id:
+                self._upsert_telegram_topic_record(session, chat_id, message_id)
             self._save_state()
 
     async def send_input(

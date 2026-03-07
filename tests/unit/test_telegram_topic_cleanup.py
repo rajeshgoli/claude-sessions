@@ -1,10 +1,12 @@
+import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
 from src.main import SessionManagerApp
-from src.models import Session, SessionStatus
+from src.models import Session, SessionStatus, TelegramTopicRecord
+from src.session_manager import SessionManager
 
 
 def _make_session(
@@ -13,20 +15,40 @@ def _make_session(
     chat_id: int = -1003506774897,
     thread_id: int | None = 12345,
     is_em: bool = False,
+    provider: str = "claude",
     tmux_session: str | None = None,
 ) -> Session:
-    session = Session(
+    return Session(
         id=session_id,
-        name=f"claude-{session_id}",
+        name=f"{provider}-{session_id}",
         working_dir="/tmp",
-        tmux_session=tmux_session or f"claude-{session_id}",
+        tmux_session=tmux_session or ("" if provider == "codex-app" else f"{provider}-{session_id}"),
         log_file=f"/tmp/{session_id}.log",
+        provider=provider,
         status=SessionStatus.IDLE,
         telegram_chat_id=chat_id,
         telegram_thread_id=thread_id,
         is_em=is_em,
     )
-    return session
+
+
+def _make_record(
+    session_id: str,
+    *,
+    chat_id: int = -1003506774897,
+    thread_id: int = 12345,
+    tmux_session: str | None = None,
+    provider: str = "claude",
+    is_em_topic: bool = False,
+) -> TelegramTopicRecord:
+    return TelegramTopicRecord(
+        session_id=session_id,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        tmux_session=tmux_session or ("" if provider == "codex-app" else f"{provider}-{session_id}"),
+        provider=provider,
+        is_em_topic=is_em_topic,
+    )
 
 
 def _make_app(
@@ -34,17 +56,57 @@ def _make_app(
     *,
     live_tmux_sessions: set[str] | None = None,
     delete_ok: bool = True,
+    records: list[TelegramTopicRecord] | None = None,
 ) -> SessionManagerApp:
     app = SessionManagerApp.__new__(SessionManagerApp)
-    app.telegram_bot = SimpleNamespace(delete_forum_topic=AsyncMock(return_value=delete_ok))
+    app.telegram_bot = SimpleNamespace(
+        delete_forum_topic=AsyncMock(return_value=delete_ok),
+        register_topic_session=Mock(),
+        _session_threads={},
+    )
     app.telegram_topic_cleanup_enabled = True
     app.telegram_topic_cleanup_interval_seconds = 900
     app._telegram_topic_cleanup_task = None
     live_tmux_sessions = live_tmux_sessions or set()
+    registry_records = records or [
+        _make_record(
+            session.id,
+            chat_id=session.telegram_chat_id,
+            thread_id=session.telegram_thread_id,
+            tmux_session=session.tmux_session,
+            provider=session.provider,
+            is_em_topic=session.is_em,
+        )
+        for session in sessions.values()
+        if session.telegram_chat_id and session.telegram_thread_id
+    ]
+    registry = {(record.chat_id, record.thread_id): record for record in registry_records}
+
+    def _mark_deleted(chat_id: int, thread_id: int, *, session=None, persist=True):
+        record = registry[(chat_id, thread_id)]
+        if record.deleted_at is None:
+            record.deleted_at = session.created_at if session else record.created_at
+
     app.session_manager = SimpleNamespace(
         default_forum_chat_id=-1003506774897,
+        orphaned_topics=[],
         sessions=sessions,
+        telegram_topic_registry=registry,
         _save_state=Mock(),
+        get_session=lambda session_id: sessions.get(session_id),
+        list_sessions=lambda include_stopped=False: list(sessions.values()),
+        get_active_telegram_topic_record=lambda session_id, chat_id=None: next(
+            (
+                record
+                for record in registry.values()
+                if record.session_id == session_id
+                and record.deleted_at is None
+                and (chat_id is None or record.chat_id == chat_id)
+            ),
+            None,
+        ),
+        mark_telegram_topic_deleted=Mock(side_effect=_mark_deleted),
+        _ensure_telegram_topic=AsyncMock(),
         tmux=SimpleNamespace(session_exists=lambda tmux_name: tmux_name in live_tmux_sessions),
     )
     return app
@@ -52,9 +114,15 @@ def _make_app(
 
 @pytest.mark.asyncio
 async def test_cleanup_deletes_topics_when_tmux_runtime_is_gone():
-    stale_idle = _make_session("idle1", tmux_session="claude-idle1")
-    stale_stopped = _make_session("stop1", tmux_session="claude-stop1")
-    app = _make_app({"idle1": stale_idle, "stop1": stale_stopped})
+    stale_idle = _make_session("idle1", thread_id=12345, tmux_session="claude-idle1")
+    stale_stopped = _make_session("stop1", thread_id=12346, tmux_session="claude-stop1")
+    app = _make_app(
+        {"idle1": stale_idle, "stop1": stale_stopped},
+        records=[
+            _make_record("idle1", thread_id=12345, tmux_session="claude-idle1"),
+            _make_record("stop1", thread_id=12346, tmux_session="claude-stop1"),
+        ],
+    )
 
     result = await app._cleanup_stale_telegram_topics_once()
 
@@ -66,16 +134,39 @@ async def test_cleanup_deletes_topics_when_tmux_runtime_is_gone():
 
 
 @pytest.mark.asyncio
-async def test_cleanup_skips_em_live_tmux_non_forum_and_missing_thread():
+async def test_cleanup_deletes_topics_when_session_record_is_missing():
+    record = _make_record("gone1", thread_id=54321, tmux_session="claude-gone1")
+    app = _make_app({}, records=[record])
+
+    result = await app._cleanup_stale_telegram_topics_once()
+
+    assert result == {"deleted": 1, "skipped": 0}
+    assert record.deleted_at is not None
+    app.session_manager.mark_telegram_topic_deleted.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_skips_em_live_tmux_non_forum_deleted_and_codex_app_topics():
+    live = _make_session("live1", tmux_session="claude-live1")
     sessions = {
-        "em1": _make_session("em1", is_em=True, tmux_session="claude-em1"),
-        "live1": _make_session("live1", tmux_session="claude-live1"),
-        "otherchat1": _make_session("otherchat1", chat_id=1234, tmux_session="claude-otherchat1"),
-        "nothread1": _make_session("nothread1", thread_id=None, tmux_session="claude-nothread1"),
-        "notmux1": _make_session("notmux1", tmux_session=None),
+        "live1": live,
+        "app1": _make_session("app1", provider="codex-app", tmux_session=""),
     }
-    sessions["notmux1"].tmux_session = None
-    app = _make_app(sessions, live_tmux_sessions={"claude-live1"})
+    records = [
+        _make_record("em1", thread_id=10001, is_em_topic=True),
+        _make_record("live1", thread_id=10002, tmux_session="claude-live1"),
+        _make_record("otherchat1", chat_id=1234, thread_id=10003),
+        TelegramTopicRecord(
+            session_id="done1",
+            chat_id=-1003506774897,
+            thread_id=10004,
+            tmux_session="claude-done1",
+            provider="claude",
+            deleted_at=live.created_at,
+        ),
+        _make_record("app1", thread_id=10005, provider="codex-app", tmux_session=""),
+    ]
+    app = _make_app(sessions, live_tmux_sessions={"claude-live1"}, records=records)
 
     result = await app._cleanup_stale_telegram_topics_once()
 
@@ -85,12 +176,140 @@ async def test_cleanup_skips_em_live_tmux_non_forum_and_missing_thread():
 
 
 @pytest.mark.asyncio
-async def test_cleanup_leaves_session_mapped_when_delete_fails():
+async def test_cleanup_leaves_registry_active_when_delete_fails():
     stale_idle = _make_session("idle1", tmux_session="claude-idle1")
     app = _make_app({"idle1": stale_idle}, delete_ok=False)
+    record = next(iter(app.session_manager.telegram_topic_registry.values()))
 
     result = await app._cleanup_stale_telegram_topics_once()
 
     assert result == {"deleted": 0, "skipped": 1}
     assert stale_idle.telegram_thread_id == 12345
+    assert record.deleted_at is None
     app.session_manager._save_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_reuses_durable_topic_before_creating_new_one():
+    session = _make_session("sess1", thread_id=None)
+    record = _make_record("sess1", thread_id=77777, tmux_session="claude-sess1")
+    app = _make_app({"sess1": session}, records=[record])
+
+    await app._reconcile_telegram_topics()
+
+    assert session.telegram_thread_id == 77777
+    app.session_manager._ensure_telegram_topic.assert_not_awaited()
+    app.telegram_bot.register_topic_session.assert_called_once_with(
+        record.chat_id,
+        record.thread_id,
+        session.id,
+    )
+    assert app.telegram_bot._session_threads[session.id] == (record.chat_id, record.thread_id)
+    app.session_manager._save_state.assert_called_once()
+
+
+def test_load_state_backfills_durable_topic_registry(tmp_path):
+    state_file = tmp_path / "sessions.json"
+    registry_file = tmp_path / "telegram_topics.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "sessions": [
+                    {
+                        "id": "dead1234",
+                        "name": "claude-dead1234",
+                        "working_dir": "/tmp",
+                        "tmux_session": "claude-dead1234",
+                        "log_file": "/tmp/dead1234.log",
+                        "status": "idle",
+                        "created_at": "2026-03-06T10:00:00",
+                        "last_activity": "2026-03-06T10:00:00",
+                        "telegram_chat_id": -1003506774897,
+                        "telegram_thread_id": 24680,
+                    }
+                ]
+            }
+        )
+    )
+    config = {
+        "telegram": {
+            "default_forum_chat_id": -1003506774897,
+            "topic_registry": {"path": str(registry_file)},
+        }
+    }
+
+    with patch("src.session_manager.TmuxController") as mock_tmux_cls:
+        mock_tmux_cls.return_value.session_exists.return_value = False
+        manager = SessionManager(
+            log_dir=str(tmp_path),
+            state_file=str(state_file),
+            config=config,
+        )
+
+    record = manager.telegram_topic_registry[(-1003506774897, 24680)]
+    assert record.session_id == "dead1234"
+    assert record.tmux_session == "claude-dead1234"
+    saved = json.loads(registry_file.read_text())
+    assert saved["topics"][0]["thread_id"] == 24680
+    assert manager.get_session("dead1234") is None
+
+
+def test_load_state_preserves_deleted_topic_tombstone(tmp_path):
+    state_file = tmp_path / "sessions.json"
+    registry_file = tmp_path / "telegram_topics.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "sessions": [
+                    {
+                        "id": "dead1234",
+                        "name": "claude-dead1234",
+                        "working_dir": "/tmp",
+                        "tmux_session": "claude-dead1234",
+                        "log_file": "/tmp/dead1234.log",
+                        "status": "idle",
+                        "created_at": "2026-03-06T10:00:00",
+                        "last_activity": "2026-03-06T10:00:00",
+                        "telegram_chat_id": -1003506774897,
+                        "telegram_thread_id": 24680,
+                    }
+                ]
+            }
+        )
+    )
+    registry_file.write_text(
+        json.dumps(
+            {
+                "topics": [
+                    {
+                        "session_id": "dead1234",
+                        "chat_id": -1003506774897,
+                        "thread_id": 24680,
+                        "tmux_session": "claude-dead1234",
+                        "provider": "claude",
+                        "created_at": "2026-03-06T10:00:00",
+                        "last_seen_at": "2026-03-06T10:00:00",
+                        "deleted_at": "2026-03-06T11:00:00",
+                        "is_em_topic": False,
+                    }
+                ]
+            }
+        )
+    )
+    config = {
+        "telegram": {
+            "default_forum_chat_id": -1003506774897,
+            "topic_registry": {"path": str(registry_file)},
+        }
+    }
+
+    with patch("src.session_manager.TmuxController") as mock_tmux_cls:
+        mock_tmux_cls.return_value.session_exists.return_value = False
+        manager = SessionManager(
+            log_dir=str(tmp_path),
+            state_file=str(state_file),
+            config=config,
+        )
+
+    record = manager.telegram_topic_registry[(-1003506774897, 24680)]
+    assert record.deleted_at is not None
