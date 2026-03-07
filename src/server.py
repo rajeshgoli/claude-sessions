@@ -373,6 +373,18 @@ async def _handle_em_topic_inheritance(session, session_manager, telegram_bot):
 
     Implements Fix B from sm#271 spec.
     """
+    def _set_session_topic(target_session, chat_id: int, thread_id: Optional[int]) -> None:
+        if callable(getattr(type(session_manager), "update_telegram_thread", None)):
+            session_manager.update_telegram_thread(target_session.id, chat_id, thread_id)
+            return
+        target_session.telegram_chat_id = chat_id
+        target_session.telegram_thread_id = thread_id
+        session_manager._save_state()
+
+    def _mark_topic_deleted(chat_id: int, thread_id: int) -> None:
+        if callable(getattr(type(session_manager), "mark_telegram_topic_deleted", None)):
+            session_manager.mark_telegram_topic_deleted(chat_id, thread_id, session=session)
+
     em_topic = session_manager.em_topic
     new_chat_id = session.telegram_chat_id
     new_thread_id = session.telegram_thread_id
@@ -396,6 +408,8 @@ async def _handle_em_topic_inheritance(session, session_manager, telegram_bot):
         session_manager._save_state()
         return
 
+    _mark_topic_deleted(new_chat_id, new_thread_id)
+
     # Remove stale _topic_sessions entry for the deleted topic (applies to all paths below)
     telegram_bot._topic_sessions.pop((new_chat_id, new_thread_id), None)
 
@@ -409,7 +423,7 @@ async def _handle_em_topic_inheritance(session, session_manager, telegram_bot):
         topic_name = f"{session.friendly_name or 'em'} [{session.id}]"
         brand_new_id = await telegram_bot.create_forum_topic(new_chat_id, topic_name)
         if brand_new_id:
-            session.telegram_thread_id = brand_new_id
+            _set_session_topic(session, new_chat_id, brand_new_id)
             telegram_bot.register_topic_session(new_chat_id, brand_new_id, session.id)
             telegram_bot._session_threads[session.id] = (new_chat_id, brand_new_id)
             session_manager.em_topic = {"chat_id": new_chat_id, "thread_id": brand_new_id}
@@ -423,7 +437,7 @@ async def _handle_em_topic_inheritance(session, session_manager, telegram_bot):
         return
 
     # Step 3: Update the session to use the inherited thread_id
-    session.telegram_thread_id = old_thread_id
+    _set_session_topic(session, new_chat_id, old_thread_id)
 
     # Step 4: Update in-memory mappings for the inherited thread
     telegram_bot.register_topic_session(new_chat_id, old_thread_id, session.id)
@@ -433,7 +447,7 @@ async def _handle_em_topic_inheritance(session, session_manager, telegram_bot):
     # closing the shared thread when cleanup_session fires (output_monitor.py:506)
     for sid, s in session_manager.sessions.items():
         if sid != session.id and s.telegram_thread_id == old_thread_id and s.telegram_chat_id == new_chat_id:
-            s.telegram_thread_id = None
+            _set_session_topic(s, new_chat_id, None)
             telegram_bot._session_threads.pop(sid, None)
             logger.info(f"Cleared old EM session {sid}'s telegram thread reference")
 

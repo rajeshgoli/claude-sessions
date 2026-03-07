@@ -61,6 +61,49 @@ class ActivityState(Enum):
 
 
 @dataclass
+class TelegramTopicRecord:
+    """Durable registry entry for a Telegram forum topic."""
+    session_id: str
+    chat_id: int
+    thread_id: int
+    tmux_session: Optional[str] = None
+    provider: Optional[str] = None
+    created_at: datetime = field(default_factory=datetime.now)
+    last_seen_at: datetime = field(default_factory=datetime.now)
+    deleted_at: Optional[datetime] = None
+    is_em_topic: bool = False
+
+    def to_dict(self) -> dict:
+        """Convert registry entry to a JSON-serializable dictionary."""
+        return {
+            "session_id": self.session_id,
+            "chat_id": self.chat_id,
+            "thread_id": self.thread_id,
+            "tmux_session": self.tmux_session,
+            "provider": self.provider,
+            "created_at": self.created_at.isoformat(),
+            "last_seen_at": self.last_seen_at.isoformat(),
+            "deleted_at": self.deleted_at.isoformat() if self.deleted_at else None,
+            "is_em_topic": self.is_em_topic,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TelegramTopicRecord":
+        """Create a registry entry from a persisted dictionary."""
+        return cls(
+            session_id=data["session_id"],
+            chat_id=data["chat_id"],
+            thread_id=data["thread_id"],
+            tmux_session=data.get("tmux_session"),
+            provider=data.get("provider"),
+            created_at=datetime.fromisoformat(data["created_at"]),
+            last_seen_at=datetime.fromisoformat(data["last_seen_at"]),
+            deleted_at=datetime.fromisoformat(data["deleted_at"]) if data.get("deleted_at") else None,
+            is_em_topic=bool(data.get("is_em_topic", False)),
+        )
+
+
+@dataclass
 class ReviewConfig:
     """Configuration for a Codex review session."""
     mode: str  # "branch", "uncommitted", "commit", "custom"

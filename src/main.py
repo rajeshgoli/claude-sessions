@@ -283,11 +283,7 @@ class SessionManagerApp:
             self.session_manager.update_telegram_thread(session_id, chat_id, message_id)
 
         async def on_update_topic(session_id: str, chat_id: int, topic_id: int) -> None:
-            session = self.session_manager.get_session(session_id)
-            if session:
-                session.telegram_chat_id = chat_id
-                session.telegram_thread_id = topic_id
-                self.session_manager._save_state()
+            self.session_manager.update_telegram_thread(session_id, chat_id, topic_id)
 
         async def on_set_name(session_id: str, name: str) -> bool:
             """Set a friendly name for a session."""
@@ -409,7 +405,8 @@ class SessionManagerApp:
         if orphaned:
             logger.info(f"Cleaning up {len(orphaned)} orphaned Telegram topics...")
             for chat_id, thread_id in orphaned:
-                await self.telegram_bot.delete_forum_topic(chat_id, thread_id)
+                if await self.telegram_bot.delete_forum_topic(chat_id, thread_id):
+                    self.session_manager.mark_telegram_topic_deleted(chat_id, thread_id)
             self.session_manager.orphaned_topics.clear()
 
         # 2. Backfill telegram_chat_id on live sessions missing it
@@ -432,6 +429,29 @@ class SessionManagerApp:
         #    already have a chat_id but lost their topic)
         for session in sessions:
             if session.telegram_chat_id and not session.telegram_thread_id:
+                durable_topic = self.session_manager.get_active_telegram_topic_record(
+                    session.id,
+                    session.telegram_chat_id,
+                )
+                if durable_topic:
+                    session.telegram_thread_id = durable_topic.thread_id
+                    self.session_manager._save_state()
+                    self.telegram_bot.register_topic_session(
+                        durable_topic.chat_id,
+                        durable_topic.thread_id,
+                        session.id,
+                    )
+                    self.telegram_bot._session_threads[session.id] = (
+                        durable_topic.chat_id,
+                        durable_topic.thread_id,
+                    )
+                    logger.info(
+                        "Reused durable Telegram topic for session %s: chat=%s, thread=%s",
+                        session.id,
+                        durable_topic.chat_id,
+                        durable_topic.thread_id,
+                    )
+                    continue
                 await self.session_manager._ensure_telegram_topic(session)
 
     async def _cleanup_stale_telegram_topics_once(self) -> dict[str, int]:
@@ -447,28 +467,46 @@ class SessionManagerApp:
         skipped = 0
         changed = False
 
-        for session in list(self.session_manager.sessions.values()):
-            if session.is_em or not session.telegram_thread_id or session.telegram_chat_id != default_chat_id:
+        for record in list(self.session_manager.telegram_topic_registry.values()):
+            if (
+                record.deleted_at is not None
+                or record.is_em_topic
+                or record.chat_id != default_chat_id
+            ):
                 skipped += 1
                 continue
 
-            if not session.tmux_session:
+            session = self.session_manager.get_session(record.session_id)
+            tmux_session = None
+            provider = record.provider
+            if session:
+                provider = session.provider
+                tmux_session = session.tmux_session
+            else:
+                tmux_session = record.tmux_session
+
+            if provider == "codex-app":
                 skipped += 1
                 continue
 
-            if self.session_manager.tmux.session_exists(session.tmux_session):
+            if tmux_session and self.session_manager.tmux.session_exists(tmux_session):
                 skipped += 1
                 continue
 
-            thread_id = session.telegram_thread_id
-            if await self.telegram_bot.delete_forum_topic(session.telegram_chat_id, thread_id):
-                session.telegram_thread_id = None
+            if await self.telegram_bot.delete_forum_topic(record.chat_id, record.thread_id):
+                self.session_manager.mark_telegram_topic_deleted(
+                    record.chat_id,
+                    record.thread_id,
+                    session=session,
+                )
+                if session and session.telegram_thread_id == record.thread_id:
+                    session.telegram_thread_id = None
                 deleted += 1
                 changed = True
                 logger.info(
-                    "Deleted stale Telegram topic for session %s because tmux runtime %s no longer exists",
-                    session.id,
-                    session.tmux_session,
+                    "Deleted stale Telegram topic for session %s because no live runtime remained for %s",
+                    record.session_id,
+                    tmux_session or record.session_id,
                 )
             else:
                 skipped += 1
