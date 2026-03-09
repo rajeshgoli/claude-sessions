@@ -142,7 +142,13 @@ def resolve_session_id(client: SessionManagerClient, identifier: str) -> tuple[O
     if sessions is None:
         return None, None  # Session manager unavailable
 
-    # Search by friendly_name
+    # Search aliases before friendly names so durable handles like
+    # "maintainer" cannot be shadowed by an arbitrary session name.
+    for s in sessions:
+        aliases = s.get("aliases") or []
+        if identifier in aliases:
+            return s["id"], s
+
     for s in sessions:
         if s.get("friendly_name") == identifier:
             return s["id"], s
@@ -335,6 +341,41 @@ def cmd_role(client: SessionManagerClient, session_id: Optional[str], role: Opti
         print("Error: Session manager unavailable", file=sys.stderr)
         return 2
     print("Error: Failed to set role", file=sys.stderr)
+    return 1
+
+
+def cmd_maintainer(client: SessionManagerClient, session_id: Optional[str], clear: bool = False) -> int:
+    """
+    Register or clear the durable maintainer alias for the current session.
+
+    Exit codes:
+        0: Success
+        1: API failure
+        2: Session manager unavailable / not in managed session
+    """
+    if not session_id:
+        print("Error: sm maintainer requires a managed session (CLAUDE_SESSION_MANAGER_ID not set)", file=sys.stderr)
+        return 2
+
+    if clear:
+        success, unavailable = client.clear_maintainer(session_id)
+        if success:
+            print("Maintainer alias cleared")
+            return 0
+        if unavailable:
+            print("Error: Session manager unavailable", file=sys.stderr)
+            return 2
+        print("Error: Failed to clear maintainer alias", file=sys.stderr)
+        return 1
+
+    success, unavailable = client.set_maintainer(session_id)
+    if success:
+        print(f"Maintainer alias registered: maintainer -> {session_id}")
+        return 0
+    if unavailable:
+        print("Error: Session manager unavailable", file=sys.stderr)
+        return 2
+    print("Error: Failed to register maintainer alias", file=sys.stderr)
     return 1
 
 

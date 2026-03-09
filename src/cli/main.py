@@ -460,6 +460,17 @@ def main():
         help="Name suffix (sets friendly name to em-<name>)",
     )
 
+    # sm maintainer [--clear]
+    maintainer_parser = subparsers.add_parser(
+        "maintainer",
+        help="Register this session as the durable maintainer alias",
+    )
+    maintainer_parser.add_argument(
+        "--clear",
+        action="store_true",
+        help="Clear the maintainer alias from this session",
+    )
+
     # sm adopt <session>
     adopt_parser = subparsers.add_parser(
         "adopt",
@@ -517,7 +528,7 @@ def main():
         "attach", "output", "codex-tui", "codex-fork-info", "codex-rollout-gates", "watch", "tail", "clear", "review", "context-monitor", "remind", "setup", None
     ]
     # Commands that require session_id: self-directed managed-session actions
-    requires_session_id = ["spawn", "adopt"]
+    requires_session_id = ["spawn", "adopt", "maintainer"]
     if not session_id and args.command in requires_session_id:
         print("Error: CLAUDE_SESSION_MANAGER_ID environment variable not set", file=sys.stderr)
         print("This tool must be run inside a Claude Code session managed by Session Manager", file=sys.stderr)
@@ -667,6 +678,8 @@ def main():
         sys.exit(commands.cmd_context_monitor(client, session_id, args.action, args.target))
     elif args.command == "em":
         sys.exit(commands.cmd_em(client, session_id, args.name))
+    elif args.command == "maintainer":
+        sys.exit(commands.cmd_maintainer(client, session_id, clear=args.clear))
     elif args.command == "adopt":
         sys.exit(commands.cmd_adopt(client, session_id, args.session))
     elif args.command == "setup":

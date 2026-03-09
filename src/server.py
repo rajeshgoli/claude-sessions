@@ -136,6 +136,8 @@ class SessionResponse(BaseModel):
     tokens_used: int = 0
     context_monitor_enabled: bool = False
     pending_adoption_proposals: list[AdoptionProposalResponse] = Field(default_factory=list)
+    aliases: list[str] = Field(default_factory=list)
+    is_maintainer: bool = False
 
 
 class SendInputRequest(BaseModel):
@@ -173,6 +175,11 @@ class AgentStatusRequest(BaseModel):
 class SetRoleRequest(BaseModel):
     """Request to set a session role tag."""
     role: str
+
+
+class SetMaintainerRequest(BaseModel):
+    """Request to register or clear the maintainer alias."""
+    requester_session_id: str
 
 
 class ClearSessionRequest(BaseModel):
@@ -592,6 +599,9 @@ def create_app(
                 if proposal.status.value != "pending":
                     continue
                 pending_adoption_proposals.append(_proposal_to_response(proposal))
+        alias_getter = getattr(app.state.session_manager, "get_session_aliases", None)
+        aliases = alias_getter(session.id) if callable(alias_getter) else []
+        is_maintainer = "maintainer" in aliases
 
         return SessionResponse(
             id=session.id,
@@ -626,6 +636,8 @@ def create_app(
             tokens_used=getattr(session, "tokens_used", 0),
             context_monitor_enabled=bool(getattr(session, "context_monitor_enabled", False)),
             pending_adoption_proposals=pending_adoption_proposals,
+            aliases=aliases,
+            is_maintainer=is_maintainer,
         )
 
     def _proposal_to_response(proposal: AdoptionProposal) -> AdoptionProposalResponse:
@@ -1501,6 +1513,42 @@ def create_app(
             session.role = None
             app.state.session_manager._save_state()
 
+        return _session_to_response(session)
+
+    @app.put("/sessions/{session_id}/maintainer", response_model=SessionResponse)
+    async def set_session_maintainer(session_id: str, request: SetMaintainerRequest):
+        """Register the current session as the durable maintainer alias."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        if request.requester_session_id != session_id:
+            raise HTTPException(status_code=400, detail="sm maintainer is self-directed only")
+
+        session = app.state.session_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        setter = getattr(app.state.session_manager, "set_maintainer_session", None)
+        if not callable(setter) or not setter(session_id):
+            raise HTTPException(status_code=400, detail="Failed to register maintainer")
+        return _session_to_response(session)
+
+    @app.delete("/sessions/{session_id}/maintainer", response_model=SessionResponse)
+    async def clear_session_maintainer(session_id: str, request: SetMaintainerRequest):
+        """Clear the durable maintainer alias owned by this session."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        if request.requester_session_id != session_id:
+            raise HTTPException(status_code=400, detail="sm maintainer --clear is self-directed only")
+
+        session = app.state.session_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        clearer = getattr(app.state.session_manager, "clear_maintainer_session", None)
+        if not callable(clearer) or not clearer(session_id):
+            raise HTTPException(status_code=400, detail="Session is not the active maintainer")
         return _session_to_response(session)
 
     @app.post("/sessions/{session_id}/context-monitor")

@@ -262,6 +262,7 @@ class SessionManager:
         # EM topic continuity (Fix B: sm#271): persisted across handoffs
         # Format: {"chat_id": int, "thread_id": int} or None
         self.em_topic: Optional[dict] = None
+        self.maintainer_session_id: Optional[str] = None
 
         self._load_telegram_topic_registry()
 
@@ -608,10 +609,13 @@ class SessionManager:
 
                 # Load EM topic continuity field (backward compat: missing = None)
                 self.em_topic = data.get("em_topic")
+                self.maintainer_session_id = data.get("maintainer_session_id")
                 self.adoption_proposals = {}
                 for proposal_data in data.get("adoption_proposals", []):
                     proposal = AdoptionProposal.from_dict(proposal_data)
                     self.adoption_proposals[proposal.id] = proposal
+                if self.maintainer_session_id and self.maintainer_session_id not in self.sessions:
+                    self.maintainer_session_id = None
                 if retired_codex_app_sessions:
                     self._save_state()
 
@@ -655,6 +659,7 @@ class SessionManager:
             data = {
                 "sessions": [s.to_dict() for s in self.sessions.values()],
                 "em_topic": self.em_topic,
+                "maintainer_session_id": self.maintainer_session_id,
                 "adoption_proposals": [
                     proposal.to_dict()
                     for proposal in sorted(
@@ -1756,6 +1761,42 @@ class SessionManager:
         session.role = None
         self._save_state()
         return True
+
+    def set_maintainer_session(self, session_id: str) -> bool:
+        """Register one session as the current maintainer alias."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+        if session.status == SessionStatus.STOPPED:
+            return False
+        self.maintainer_session_id = session_id
+        self._save_state()
+        return True
+
+    def clear_maintainer_session(self, session_id: str) -> bool:
+        """Clear the maintainer alias if owned by the given session."""
+        if self.maintainer_session_id != session_id:
+            return False
+        self.maintainer_session_id = None
+        self._save_state()
+        return True
+
+    def get_maintainer_session(self) -> Optional[Session]:
+        """Return the active maintainer session if one is registered."""
+        if not self.maintainer_session_id:
+            return None
+        session = self.sessions.get(self.maintainer_session_id)
+        if not session or session.status == SessionStatus.STOPPED:
+            return None
+        return session
+
+    def get_session_aliases(self, session_id: str) -> list[str]:
+        """Return durable aliases that should resolve to this session."""
+        aliases: list[str] = []
+        maintainer = self.get_maintainer_session()
+        if maintainer and maintainer.id == session_id:
+            aliases.append("maintainer")
+        return aliases
 
     def list_sessions(self, include_stopped: bool = False) -> list[Session]:
         """List all sessions."""
