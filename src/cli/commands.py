@@ -379,6 +379,144 @@ def cmd_maintainer(client: SessionManagerClient, session_id: Optional[str], clea
     return 1
 
 
+def cmd_register(client: SessionManagerClient, session_id: Optional[str], role: str) -> int:
+    """
+    Register the current session for one durable agent registry role.
+
+    Exit codes:
+        0: Success
+        1: Validation/API error
+        2: Session manager unavailable / unmanaged session
+    """
+    if not session_id:
+        print("Error: sm register requires a managed session (CLAUDE_SESSION_MANAGER_ID not set)", file=sys.stderr)
+        return 2
+
+    normalized_role = (role or "").strip()
+    if not normalized_role:
+        print("Error: role is required", file=sys.stderr)
+        return 1
+
+    result = client.register_role(session_id, normalized_role)
+    if result.get("unavailable"):
+        print("Error: Session manager unavailable", file=sys.stderr)
+        return 2
+    if not result.get("ok"):
+        detail = result.get("detail") or "Failed to register role"
+        print(f"Error: {detail}", file=sys.stderr)
+        return 1
+
+    registration = result.get("data") or {}
+    role_name = registration.get("role") or normalized_role
+    target_session = registration.get("session_id") or session_id
+    print(f"Registered: {role_name} -> {target_session}")
+    return 0
+
+
+def cmd_unregister(client: SessionManagerClient, session_id: Optional[str], role: str) -> int:
+    """
+    Remove one durable registry role from the current session.
+
+    Exit codes:
+        0: Success
+        1: Validation/API error
+        2: Session manager unavailable / unmanaged session
+    """
+    if not session_id:
+        print("Error: sm unregister requires a managed session (CLAUDE_SESSION_MANAGER_ID not set)", file=sys.stderr)
+        return 2
+
+    normalized_role = (role or "").strip()
+    if not normalized_role:
+        print("Error: role is required", file=sys.stderr)
+        return 1
+
+    result = client.unregister_role(session_id, normalized_role)
+    if result.get("unavailable"):
+        print("Error: Session manager unavailable", file=sys.stderr)
+        return 2
+    if not result.get("ok"):
+        detail = result.get("detail") or "Failed to unregister role"
+        print(f"Error: {detail}", file=sys.stderr)
+        return 1
+
+    registration = result.get("data") or {}
+    role_name = registration.get("role") or normalized_role
+    print(f"Unregistered: {role_name}")
+    return 0
+
+
+def cmd_lookup(client: SessionManagerClient, role: str) -> int:
+    """
+    Resolve a durable registry role to its owning session ID.
+
+    Prints only the session ID on stdout so it can be used in command substitution.
+    """
+    normalized_role = (role or "").strip()
+    if not normalized_role:
+        print("Error: role is required", file=sys.stderr)
+        return 1
+
+    result = client.lookup_role(normalized_role)
+    if result.get("unavailable"):
+        print("Error: Session manager unavailable", file=sys.stderr)
+        return 2
+    if not result.get("ok"):
+        detail = result.get("detail") or "Role not registered"
+        print(f"Error: {detail}", file=sys.stderr)
+        return 1
+
+    registration = result.get("data") or {}
+    session_id = registration.get("session_id")
+    if not session_id:
+        print("Error: Role lookup returned no session ID", file=sys.stderr)
+        return 1
+    print(session_id)
+    return 0
+
+
+def cmd_roster(client: SessionManagerClient) -> int:
+    """
+    List all live durable registry roles.
+
+    Exit codes:
+        0: Success
+        1: API failure
+        2: Session manager unavailable
+    """
+    registrations = client.list_registry()
+    if registrations is None:
+        print("Error: Session manager unavailable", file=sys.stderr)
+        return 2
+    if not registrations:
+        print("No registered roles.")
+        return 0
+
+    headers = ("Role", "Session ID", "Name", "Provider", "State")
+    rows = [
+        (
+            str(entry.get("role") or ""),
+            str(entry.get("session_id") or ""),
+            str(entry.get("friendly_name") or ""),
+            str(entry.get("provider") or ""),
+            str(entry.get("activity_state") or entry.get("status") or ""),
+        )
+        for entry in registrations
+    ]
+    widths = [
+        max(len(header), *(len(row[idx]) for row in rows))
+        for idx, header in enumerate(headers)
+    ]
+
+    header_line = "  ".join(header.ljust(widths[idx]) for idx, header in enumerate(headers))
+    divider = "  ".join("-" * widths[idx] for idx in range(len(headers)))
+    print(header_line)
+    print(divider)
+    for row in rows:
+        print("  ".join(value.ljust(widths[idx]) for idx, value in enumerate(row)))
+    return 0
+
+
 def cmd_me(client: SessionManagerClient, session_id: str) -> int:
     """
     Show current session info.

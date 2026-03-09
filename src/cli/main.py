@@ -482,6 +482,42 @@ def main():
         help="Clear the maintainer alias from this session",
     )
 
+    # sm register <role>
+    register_parser = subparsers.add_parser(
+        "register",
+        help="Register this session under a durable agent registry role",
+    )
+    register_parser.add_argument(
+        "role",
+        help="Registry role to claim (example: reviewer, sm-maintainer)",
+    )
+
+    # sm unregister <role>
+    unregister_parser = subparsers.add_parser(
+        "unregister",
+        help="Remove one durable agent registry role from this session",
+    )
+    unregister_parser.add_argument(
+        "role",
+        help="Registry role to release",
+    )
+
+    # sm lookup <role>
+    lookup_parser = subparsers.add_parser(
+        "lookup",
+        help="Resolve a durable agent registry role to its session ID",
+    )
+    lookup_parser.add_argument(
+        "role",
+        help="Registry role to resolve",
+    )
+
+    # sm roster
+    subparsers.add_parser(
+        "roster",
+        help="List live durable agent registry roles",
+    )
+
     # sm adopt <session>
     adopt_parser = subparsers.add_parser(
         "adopt",
@@ -536,10 +572,10 @@ def main():
         "lock", "unlock", "subagent-start", "subagent-stop", "all", "send", "wait", "what",
         "subagents", "children", "kill", "new", "claude", "codex", "codex-legacy", "codex-fork", "codex_fork",
         "codex-2", "codex-app", "codex-server",
-        "attach", "output", "codex-tui", "codex-fork-info", "codex-rollout-gates", "watch", "tail", "clear", "review", "context-monitor", "remind", "setup", None
+        "attach", "output", "codex-tui", "codex-fork-info", "codex-rollout-gates", "watch", "tail", "clear", "review", "context-monitor", "remind", "setup", "lookup", "roster", None
     ]
     # Commands that require session_id: self-directed managed-session actions
-    requires_session_id = ["spawn", "adopt", "maintainer"]
+    requires_session_id = ["spawn", "adopt", "maintainer", "register", "unregister"]
     if not session_id and args.command in requires_session_id:
         print("Error: CLAUDE_SESSION_MANAGER_ID environment variable not set", file=sys.stderr)
         print("This tool must be run inside a Claude Code session managed by Session Manager", file=sys.stderr)
@@ -693,6 +729,14 @@ def main():
         sys.exit(commands.cmd_em(client, session_id, args.name))
     elif args.command == "maintainer":
         sys.exit(commands.cmd_maintainer(client, session_id, clear=args.clear))
+    elif args.command == "register":
+        sys.exit(commands.cmd_register(client, session_id, args.role))
+    elif args.command == "unregister":
+        sys.exit(commands.cmd_unregister(client, session_id, args.role))
+    elif args.command == "lookup":
+        sys.exit(commands.cmd_lookup(client, args.role))
+    elif args.command == "roster":
+        sys.exit(commands.cmd_roster(client))
     elif args.command == "adopt":
         sys.exit(commands.cmd_adopt(client, session_id, args.session))
     elif args.command == "setup":

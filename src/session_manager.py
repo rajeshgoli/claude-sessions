@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional, Callable, Awaitable, Any
 
 from .models import (
+    AgentRegistration,
     ActivityState,
     AdoptionProposal,
     AdoptionProposalStatus,
@@ -117,6 +118,7 @@ class SessionManager:
         self.telegram_topic_registry: dict[tuple[int, int], TelegramTopicRecord] = {}
         self._topic_creator: Optional[Callable[..., Awaitable[Optional[int]]]] = None
         self.adoption_proposals: dict[str, AdoptionProposal] = {}
+        self.agent_registrations: dict[str, AgentRegistration] = {}
 
         codex_config = self.config.get("codex", {})
         codex_app_config = self.config.get("codex_app_server", codex_config)
@@ -610,13 +612,21 @@ class SessionManager:
                 # Load EM topic continuity field (backward compat: missing = None)
                 self.em_topic = data.get("em_topic")
                 self.maintainer_session_id = data.get("maintainer_session_id")
+                self.agent_registrations = {}
+                for registration_data in data.get("agent_registrations", []):
+                    registration = AgentRegistration.from_dict(registration_data)
+                    self.agent_registrations[registration.role] = registration
+                if self.maintainer_session_id and "maintainer" not in self.agent_registrations:
+                    self.agent_registrations["maintainer"] = AgentRegistration(
+                        role="maintainer",
+                        session_id=self.maintainer_session_id,
+                    )
                 self.adoption_proposals = {}
                 for proposal_data in data.get("adoption_proposals", []):
                     proposal = AdoptionProposal.from_dict(proposal_data)
                     self.adoption_proposals[proposal.id] = proposal
-                if self.maintainer_session_id and self.maintainer_session_id not in self.sessions:
-                    self.maintainer_session_id = None
-                if retired_codex_app_sessions:
+                registry_changed = self._prune_agent_registrations(persist=False)
+                if retired_codex_app_sessions or registry_changed:
                     self._save_state()
 
                 return True
@@ -660,6 +670,13 @@ class SessionManager:
                 "sessions": [s.to_dict() for s in self.sessions.values()],
                 "em_topic": self.em_topic,
                 "maintainer_session_id": self.maintainer_session_id,
+                "agent_registrations": [
+                    registration.to_dict()
+                    for registration in sorted(
+                        self.agent_registrations.values(),
+                        key=lambda registration: (registration.role, registration.created_at),
+                    )
+                ],
                 "adoption_proposals": [
                     proposal.to_dict()
                     for proposal in sorted(
@@ -1762,41 +1779,149 @@ class SessionManager:
         self._save_state()
         return True
 
-    def set_maintainer_session(self, session_id: str) -> bool:
-        """Register one session as the current maintainer alias."""
+    @staticmethod
+    def normalize_agent_role(role: str) -> str:
+        """Canonicalize registry roles for stable lookup and CLI use."""
+        raw = (role or "").strip().lower()
+        if not raw:
+            return ""
+        normalized = re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
+        return re.sub(r"-{2,}", "-", normalized)
+
+    def _synchronize_maintainer_alias(self) -> None:
+        """Keep the legacy maintainer compatibility field in sync with the registry."""
+        registration = self.agent_registrations.get("maintainer")
+        self.maintainer_session_id = registration.session_id if registration else None
+
+    def _get_live_registered_session(self, session_id: str) -> Optional[Session]:
+        """Return the owning session when it is still live for registry purposes."""
         session = self.sessions.get(session_id)
-        if not session:
-            return False
-        if session.status == SessionStatus.STOPPED:
-            return False
-        self.maintainer_session_id = session_id
-        self._save_state()
-        return True
-
-    def clear_maintainer_session(self, session_id: str) -> bool:
-        """Clear the maintainer alias if owned by the given session."""
-        if self.maintainer_session_id != session_id:
-            return False
-        self.maintainer_session_id = None
-        self._save_state()
-        return True
-
-    def get_maintainer_session(self) -> Optional[Session]:
-        """Return the active maintainer session if one is registered."""
-        if not self.maintainer_session_id:
-            return None
-        session = self.sessions.get(self.maintainer_session_id)
         if not session or session.status == SessionStatus.STOPPED:
             return None
         return session
 
+    def _prune_agent_registrations(self, persist: bool = True) -> bool:
+        """Drop registrations whose owning sessions no longer exist or are no longer live."""
+        removed = False
+        for role, registration in list(self.agent_registrations.items()):
+            if self._get_live_registered_session(registration.session_id):
+                continue
+            self.agent_registrations.pop(role, None)
+            removed = True
+        if removed:
+            self._synchronize_maintainer_alias()
+            if persist:
+                self._save_state()
+        return removed
+
+    def register_agent_role(self, session_id: str, role: str) -> AgentRegistration:
+        """Register one live session as the current owner for a registry role."""
+        normalized_role = self.normalize_agent_role(role)
+        if not normalized_role:
+            raise ValueError("Role cannot be empty")
+
+        session = self.sessions.get(session_id)
+        if not session:
+            raise ValueError("Session not found")
+        if session.status == SessionStatus.STOPPED:
+            raise ValueError("Stopped sessions cannot register roles")
+
+        self._prune_agent_registrations(persist=False)
+        existing = self.agent_registrations.get(normalized_role)
+        if existing and existing.session_id != session_id:
+            live_owner = self._get_live_registered_session(existing.session_id)
+            if live_owner:
+                raise ValueError(
+                    f'Role "{normalized_role}" is already registered to {existing.session_id}'
+                )
+
+        registration = existing or AgentRegistration(role=normalized_role, session_id=session_id)
+        registration.session_id = session_id
+        self.agent_registrations[normalized_role] = registration
+        self._synchronize_maintainer_alias()
+        self._save_state()
+        return registration
+
+    def unregister_agent_role(self, session_id: str, role: str) -> bool:
+        """Clear one registry role when owned by the given session."""
+        normalized_role = self.normalize_agent_role(role)
+        if not normalized_role:
+            return False
+        registration = self.agent_registrations.get(normalized_role)
+        if not registration or registration.session_id != session_id:
+            return False
+        self.agent_registrations.pop(normalized_role, None)
+        self._synchronize_maintainer_alias()
+        self._save_state()
+        return True
+
+    def unregister_session_roles(self, session_id: str, persist: bool = True) -> list[str]:
+        """Remove all registry roles owned by one session."""
+        removed_roles = [
+            role
+            for role, registration in self.agent_registrations.items()
+            if registration.session_id == session_id
+        ]
+        if not removed_roles:
+            return []
+        for role in removed_roles:
+            self.agent_registrations.pop(role, None)
+        self._synchronize_maintainer_alias()
+        if persist:
+            self._save_state()
+        return sorted(removed_roles)
+
+    def lookup_agent_registration(self, role: str) -> Optional[AgentRegistration]:
+        """Resolve one registry role to its current live registration."""
+        normalized_role = self.normalize_agent_role(role)
+        if not normalized_role:
+            return None
+        self._prune_agent_registrations(persist=True)
+        registration = self.agent_registrations.get(normalized_role)
+        if not registration:
+            return None
+        if not self._get_live_registered_session(registration.session_id):
+            self.agent_registrations.pop(normalized_role, None)
+            self._synchronize_maintainer_alias()
+            self._save_state()
+            return None
+        return registration
+
+    def list_agent_registrations(self) -> list[AgentRegistration]:
+        """List all live registry roles."""
+        self._prune_agent_registrations(persist=True)
+        registrations = list(self.agent_registrations.values())
+        registrations.sort(key=lambda registration: registration.role)
+        return registrations
+
+    def set_maintainer_session(self, session_id: str) -> bool:
+        """Register one session as the current maintainer alias."""
+        try:
+            self.register_agent_role(session_id, "maintainer")
+            return True
+        except ValueError:
+            return False
+
+    def clear_maintainer_session(self, session_id: str) -> bool:
+        """Clear the maintainer alias if owned by the given session."""
+        return self.unregister_agent_role(session_id, "maintainer")
+
+    def get_maintainer_session(self) -> Optional[Session]:
+        """Return the active maintainer session if one is registered."""
+        registration = self.lookup_agent_registration("maintainer")
+        if not registration:
+            return None
+        return self._get_live_registered_session(registration.session_id)
+
     def get_session_aliases(self, session_id: str) -> list[str]:
         """Return durable aliases that should resolve to this session."""
-        aliases: list[str] = []
-        maintainer = self.get_maintainer_session()
-        if maintainer and maintainer.id == session_id:
-            aliases.append("maintainer")
-        return aliases
+        self._prune_agent_registrations(persist=True)
+        aliases = [
+            role
+            for role, registration in self.agent_registrations.items()
+            if registration.session_id == session_id
+        ]
+        return sorted(aliases)
 
     def list_sessions(self, include_stopped: bool = False) -> list[Session]:
         """List all sessions."""
@@ -3296,6 +3421,7 @@ class SessionManager:
                 )
             self.tmux.kill_session(session.tmux_session)
         session.status = SessionStatus.STOPPED
+        self.unregister_session_roles(session_id, persist=False)
         self._save_state()
 
         logger.info(f"Killed session {session.name}")

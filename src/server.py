@@ -140,6 +140,17 @@ class SessionResponse(BaseModel):
     is_maintainer: bool = False
 
 
+class AgentRegistrationResponse(BaseModel):
+    """Response payload for one live agent registry entry."""
+    role: str
+    session_id: str
+    friendly_name: Optional[str] = None
+    provider: Optional[str] = None
+    status: str
+    activity_state: str = "idle"
+    created_at: str
+
+
 class SendInputRequest(BaseModel):
     """Request to send input to a session."""
     text: str
@@ -180,6 +191,12 @@ class SetRoleRequest(BaseModel):
 class SetMaintainerRequest(BaseModel):
     """Request to register or clear the maintainer alias."""
     requester_session_id: str
+
+
+class RoleRegistrationRequest(BaseModel):
+    """Request to register or clear a generic agent registry role."""
+    requester_session_id: str
+    role: str
 
 
 class ClearSessionRequest(BaseModel):
@@ -653,6 +670,20 @@ def create_app(
             created_at=proposal.created_at.isoformat(),
             status=proposal.status.value,
             decided_at=proposal.decided_at.isoformat() if proposal.decided_at else None,
+        )
+
+    def _registration_to_response(registration) -> AgentRegistrationResponse:
+        session = app.state.session_manager.get_session(registration.session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Registered session not found")
+        return AgentRegistrationResponse(
+            role=registration.role,
+            session_id=registration.session_id,
+            friendly_name=session.friendly_name or session.name or session.id,
+            provider=getattr(session, "provider", "claude"),
+            status=session.status.value,
+            activity_state=_get_activity_state(session),
+            created_at=registration.created_at.isoformat(),
         )
 
     def _response_dict(model: BaseModel) -> dict:
@@ -1529,7 +1560,9 @@ def create_app(
             raise HTTPException(status_code=404, detail="Session not found")
 
         setter = getattr(app.state.session_manager, "set_maintainer_session", None)
-        if not callable(setter) or not setter(session_id):
+        if not callable(setter):
+            raise HTTPException(status_code=503, detail="Maintainer registry unavailable")
+        if not setter(session_id):
             raise HTTPException(status_code=400, detail="Failed to register maintainer")
         return _session_to_response(session)
 
@@ -1550,6 +1583,84 @@ def create_app(
         if not callable(clearer) or not clearer(session_id):
             raise HTTPException(status_code=400, detail="Session is not the active maintainer")
         return _session_to_response(session)
+
+    @app.get("/registry")
+    async def list_agent_registry():
+        """List live agent registry roles."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        lister = getattr(app.state.session_manager, "list_agent_registrations", None)
+        if not callable(lister):
+            raise HTTPException(status_code=503, detail="Agent registry unavailable")
+
+        registrations = [_registration_to_response(registration) for registration in lister()]
+        return {"registrations": [_response_dict(registration) for registration in registrations]}
+
+    @app.get("/registry/{role}", response_model=AgentRegistrationResponse)
+    async def lookup_agent_registry(role: str):
+        """Resolve one registry role to the owning live session."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        getter = getattr(app.state.session_manager, "lookup_agent_registration", None)
+        if not callable(getter):
+            raise HTTPException(status_code=503, detail="Agent registry unavailable")
+
+        registration = getter(role)
+        if registration is None:
+            raise HTTPException(status_code=404, detail="Role not registered")
+        return _registration_to_response(registration)
+
+    @app.post("/sessions/{session_id}/registry", response_model=AgentRegistrationResponse)
+    async def register_agent_role(session_id: str, request: RoleRegistrationRequest):
+        """Register the current session for one registry role."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        if request.requester_session_id != session_id:
+            raise HTTPException(status_code=400, detail="sm register is self-directed only")
+
+        session = app.state.session_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        registrar = getattr(app.state.session_manager, "register_agent_role", None)
+        if not callable(registrar):
+            raise HTTPException(status_code=503, detail="Agent registry unavailable")
+
+        try:
+            registration = registrar(session_id, request.role)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return _registration_to_response(registration)
+
+    @app.delete("/sessions/{session_id}/registry", response_model=AgentRegistrationResponse)
+    async def unregister_agent_role(session_id: str, request: RoleRegistrationRequest):
+        """Remove one registry role owned by the current session."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        if request.requester_session_id != session_id:
+            raise HTTPException(status_code=400, detail="sm unregister is self-directed only")
+
+        session = app.state.session_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        getter = getattr(app.state.session_manager, "lookup_agent_registration", None)
+        clearer = getattr(app.state.session_manager, "unregister_agent_role", None)
+        if not callable(getter) or not callable(clearer):
+            raise HTTPException(status_code=503, detail="Agent registry unavailable")
+
+        registration = getter(request.role)
+        if registration is None:
+            raise HTTPException(status_code=404, detail="Role not registered")
+        if registration.session_id != session_id:
+            raise HTTPException(status_code=409, detail="Role is not owned by this session")
+        response = _registration_to_response(registration)
+        clearer(session_id, request.role)
+        return response
 
     @app.post("/sessions/{session_id}/context-monitor")
     async def set_context_monitor(session_id: str, request: ContextMonitorRequest):
