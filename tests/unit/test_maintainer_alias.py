@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 from fastapi.testclient import TestClient
 
-from src.cli.commands import cmd_maintainer, resolve_session_id
+from src.cli.commands import cmd_maintainer, cmd_send, resolve_session_id
 from src.models import Session, SessionStatus
 from src.server import create_app
 from src.session_manager import SessionManager
@@ -124,3 +125,127 @@ def test_cmd_maintainer_clear(capsys):
     assert rc == 0
     client.clear_maintainer.assert_called_once_with("maint123")
     assert "cleared" in capsys.readouterr().out
+
+
+def test_ensure_maintainer_session_prefers_codex_fork_and_registers_alias(tmp_path):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    manager = _manager(tmp_path)
+    manager.maintainer_working_dir = str(repo_dir)
+
+    async def _fake_create_session_common(**kwargs):
+        session = Session(
+            id="maint001",
+            working_dir=kwargs["working_dir"],
+            provider=kwargs["provider"],
+            friendly_name=kwargs["friendly_name"],
+            log_file=str(tmp_path / "maint001.log"),
+            status=SessionStatus.RUNNING,
+        )
+        manager.sessions[session.id] = session
+        _fake_create_session_common.kwargs = kwargs
+        return session
+
+    manager._provider_entrypoint_available = Mock(return_value=True)
+    manager._create_session_common = AsyncMock(side_effect=_fake_create_session_common)
+
+    session, created = asyncio.run(manager.ensure_maintainer_session())
+
+    assert created is True
+    assert session.id == "maint001"
+    assert session.provider == "codex-fork"
+    assert session.role == "maintainer"
+    assert manager.lookup_agent_registration("maintainer").session_id == session.id
+    assert _fake_create_session_common.kwargs["working_dir"] == str(repo_dir)
+    assert "sm send maintainer" in _fake_create_session_common.kwargs["initial_prompt"]
+
+
+def test_ensure_maintainer_session_falls_back_to_claude(tmp_path):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    manager = _manager(tmp_path)
+    manager.maintainer_working_dir = str(repo_dir)
+
+    async def _fake_create_session_common(**kwargs):
+        session = Session(
+            id="maint002",
+            working_dir=kwargs["working_dir"],
+            provider=kwargs["provider"],
+            friendly_name=kwargs["friendly_name"],
+            log_file=str(tmp_path / "maint002.log"),
+            status=SessionStatus.RUNNING,
+        )
+        manager.sessions[session.id] = session
+        return session
+
+    manager._provider_entrypoint_available = Mock(side_effect=lambda provider: provider != "codex-fork")
+    manager._create_session_common = AsyncMock(side_effect=_fake_create_session_common)
+
+    session, created = asyncio.run(manager.ensure_maintainer_session())
+
+    assert created is True
+    assert session.provider == "claude"
+    manager._create_session_common.assert_awaited_once()
+
+
+def test_post_ensure_maintainer_bootstraps_session(tmp_path):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    manager = _manager(tmp_path)
+    manager.maintainer_working_dir = str(repo_dir)
+
+    async def _fake_create_session_common(**kwargs):
+        session = Session(
+            id="maint003",
+            working_dir=kwargs["working_dir"],
+            provider=kwargs["provider"],
+            friendly_name=kwargs["friendly_name"],
+            log_file=str(tmp_path / "maint003.log"),
+            status=SessionStatus.RUNNING,
+        )
+        manager.sessions[session.id] = session
+        return session
+
+    manager._provider_entrypoint_available = Mock(return_value=True)
+    manager._create_session_common = AsyncMock(side_effect=_fake_create_session_common)
+    client = TestClient(create_app(session_manager=manager))
+
+    response = client.post("/maintainer/ensure", json={})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["created"] is True
+    assert payload["session"]["id"] == "maint003"
+    assert payload["session"]["aliases"] == ["maintainer"]
+    assert payload["session"]["provider"] == "codex-fork"
+
+
+def test_cmd_send_bootstraps_maintainer_when_missing(capsys):
+    client = Mock()
+    client.get_session.return_value = None
+    client.list_sessions.return_value = []
+    client.session_id = "sender123"
+    client.ensure_maintainer.return_value = {
+        "ok": True,
+        "unavailable": False,
+        "data": {
+            "created": True,
+            "session": {
+                "id": "maint004",
+                "friendly_name": "sm-maintainer",
+                "name": "codex-fork-maint004",
+                "provider": "codex-fork",
+            },
+        },
+    }
+    client.send_input.return_value = (True, False)
+
+    rc = cmd_send(client, "maintainer", "bug report")
+
+    assert rc == 0
+    client.ensure_maintainer.assert_called_once_with(requester_session_id="sender123")
+    client.send_input.assert_called_once()
+    assert client.send_input.call_args[0][0] == "maint004"
+    output = capsys.readouterr().out
+    assert "Maintainer bootstrapped: sm-maintainer (maint004) [codex-fork]" in output
+    assert "Input sent to sm-maintainer (maint004)" in output
