@@ -221,6 +221,34 @@ class SessionManagerClient:
         )
         return success, unavailable
 
+    def set_maintainer(self, session_id: str) -> tuple[bool, bool]:
+        """
+        Register session as the durable maintainer alias.
+
+        Returns:
+            Tuple of (success, unavailable)
+        """
+        data, success, unavailable = self._request(
+            "PUT",
+            f"/sessions/{session_id}/maintainer",
+            {"requester_session_id": session_id},
+        )
+        return success, unavailable
+
+    def clear_maintainer(self, session_id: str) -> tuple[bool, bool]:
+        """
+        Clear the durable maintainer alias for this session.
+
+        Returns:
+            Tuple of (success, unavailable)
+        """
+        data, success, unavailable = self._request(
+            "DELETE",
+            f"/sessions/{session_id}/maintainer",
+            {"requester_session_id": session_id},
+        )
+        return success, unavailable
+
     def update_task(self, session_id: str, task: str) -> tuple[bool, bool]:
         """
         Update session current task.
