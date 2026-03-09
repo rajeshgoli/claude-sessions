@@ -142,12 +142,15 @@ def resolve_session_id(client: SessionManagerClient, identifier: str) -> tuple[O
     if sessions is None:
         return None, None  # Session manager unavailable
 
-    # Search by friendly_name or durable aliases
+    # Search aliases before friendly names so durable handles like
+    # "maintainer" cannot be shadowed by an arbitrary session name.
     for s in sessions:
-        if s.get("friendly_name") == identifier:
-            return s["id"], s
         aliases = s.get("aliases") or []
         if identifier in aliases:
+            return s["id"], s
+
+    for s in sessions:
+        if s.get("friendly_name") == identifier:
             return s["id"], s
 
     return None, None  # Not found

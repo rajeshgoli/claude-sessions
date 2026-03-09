@@ -1518,6 +1518,9 @@ def create_app(
     @app.put("/sessions/{session_id}/maintainer", response_model=SessionResponse)
     async def set_session_maintainer(session_id: str, request: SetMaintainerRequest):
         """Register the current session as the durable maintainer alias."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
         if request.requester_session_id != session_id:
             raise HTTPException(status_code=400, detail="sm maintainer is self-directed only")
 
@@ -1533,6 +1536,9 @@ def create_app(
     @app.delete("/sessions/{session_id}/maintainer", response_model=SessionResponse)
     async def clear_session_maintainer(session_id: str, request: SetMaintainerRequest):
         """Clear the durable maintainer alias owned by this session."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
         if request.requester_session_id != session_id:
             raise HTTPException(status_code=400, detail="sm maintainer --clear is self-directed only")
 

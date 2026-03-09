@@ -69,6 +69,15 @@ def test_put_maintainer_requires_self_auth(tmp_path):
     assert "self-directed" in response.json()["detail"]
 
 
+def test_put_maintainer_requires_session_manager():
+    client = TestClient(create_app(session_manager=None))
+
+    response = client.put("/sessions/maint123/maintainer", json={"requester_session_id": "maint123"})
+
+    assert response.status_code == 503
+    assert "not configured" in response.json()["detail"]
+
+
 def test_resolve_session_id_matches_alias():
     client = Mock()
     client.get_session.return_value = None
@@ -80,6 +89,19 @@ def test_resolve_session_id_matches_alias():
 
     assert resolved_id == "maint123"
     assert resolved_session["friendly_name"] == "codex-ops"
+
+
+def test_resolve_session_id_prefers_alias_over_friendly_name():
+    client = Mock()
+    client.get_session.return_value = None
+    client.list_sessions.return_value = [
+        {"id": "shadow123", "friendly_name": "maintainer", "aliases": []},
+        {"id": "maint123", "friendly_name": "codex-ops", "aliases": ["maintainer"]},
+    ]
+
+    resolved_id, _ = resolve_session_id(client, "maintainer")
+
+    assert resolved_id == "maint123"
 
 
 def test_cmd_maintainer_registers_alias(capsys):
