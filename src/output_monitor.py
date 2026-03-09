@@ -631,6 +631,9 @@ class OutputMonitor:
 
         # Remove from session manager
         if self._session_manager:
+            unregister_roles = getattr(self._session_manager, "unregister_session_roles", None)
+            if callable(unregister_roles):
+                unregister_roles(session_id, persist=False)
             if session_id in self._session_manager.sessions:
                 del self._session_manager.sessions[session_id]
                 logger.debug(f"Removed session {session_id} from sessions dict")

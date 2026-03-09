@@ -68,6 +68,31 @@ class AdoptionProposalStatus(Enum):
 
 
 @dataclass
+class AgentRegistration:
+    """Durable mapping from a registry role to the current owning session."""
+    role: str
+    session_id: str
+    created_at: datetime = field(default_factory=datetime.now)
+
+    def to_dict(self) -> dict:
+        """Convert registration to a JSON-serializable dictionary."""
+        return {
+            "role": self.role,
+            "session_id": self.session_id,
+            "created_at": self.created_at.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AgentRegistration":
+        """Restore a registration from persisted state."""
+        return cls(
+            role=data["role"],
+            session_id=data["session_id"],
+            created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else datetime.now(),
+        )
+
+
+@dataclass
 class TelegramTopicRecord:
     """Durable registry entry for a Telegram forum topic."""
     session_id: str

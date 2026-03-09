@@ -127,6 +127,49 @@ class SessionManagerClient:
             return data.get("sessions", [])
         return None
 
+    def list_registry(self) -> Optional[list]:
+        """List all live agent registry entries."""
+        data, success, _ = self._request("GET", "/registry")
+        if success and data:
+            return data.get("registrations", [])
+        return None
+
+    def lookup_role(self, role: str) -> dict:
+        """Resolve one registry role."""
+        role_path = urllib.parse.quote(role, safe="")
+        data, status_code, unavailable = self._request_with_status("GET", f"/registry/{role_path}")
+        if unavailable:
+            return {"ok": False, "unavailable": True, "status_code": None, "data": None, "detail": None}
+        ok = status_code in (200, 201)
+        detail = data.get("detail") if isinstance(data, dict) else None
+        return {"ok": ok, "unavailable": False, "status_code": status_code, "data": data, "detail": detail}
+
+    def register_role(self, session_id: str, role: str) -> dict:
+        """Register the current session for one registry role."""
+        data, status_code, unavailable = self._request_with_status(
+            "POST",
+            f"/sessions/{session_id}/registry",
+            {"requester_session_id": session_id, "role": role},
+        )
+        if unavailable:
+            return {"ok": False, "unavailable": True, "status_code": None, "data": None, "detail": None}
+        ok = status_code in (200, 201)
+        detail = data.get("detail") if isinstance(data, dict) else None
+        return {"ok": ok, "unavailable": False, "status_code": status_code, "data": data, "detail": detail}
+
+    def unregister_role(self, session_id: str, role: str) -> dict:
+        """Remove one registry role from the current session."""
+        data, status_code, unavailable = self._request_with_status(
+            "DELETE",
+            f"/sessions/{session_id}/registry",
+            {"requester_session_id": session_id, "role": role},
+        )
+        if unavailable:
+            return {"ok": False, "unavailable": True, "status_code": None, "data": None, "detail": None}
+        ok = status_code in (200, 201)
+        detail = data.get("detail") if isinstance(data, dict) else None
+        return {"ok": ok, "unavailable": False, "status_code": status_code, "data": data, "detail": detail}
+
     def propose_adoption(self, target_session_id: str, requester_session_id: str) -> dict:
         """Create an adoption proposal for explicit operator approval."""
         data, status_code, unavailable = self._request_with_status(
