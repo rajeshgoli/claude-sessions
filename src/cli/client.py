@@ -292,6 +292,23 @@ class SessionManagerClient:
         )
         return success, unavailable
 
+    def ensure_maintainer(self, requester_session_id: Optional[str] = None) -> dict:
+        """Ensure the maintainer service session exists."""
+        payload = {}
+        if requester_session_id:
+            payload["requester_session_id"] = requester_session_id
+        data, status_code, unavailable = self._request_with_status(
+            "POST",
+            "/maintainer/ensure",
+            payload,
+            timeout=10,
+        )
+        if unavailable:
+            return {"ok": False, "unavailable": True, "status_code": None, "data": None, "detail": None}
+        ok = status_code in (200, 201)
+        detail = data.get("detail") if isinstance(data, dict) else None
+        return {"ok": ok, "unavailable": False, "status_code": status_code, "data": data, "detail": detail}
+
     def update_task(self, session_id: str, task: str) -> tuple[bool, bool]:
         """
         Update session current task.

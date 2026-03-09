@@ -4,8 +4,12 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import re
+import shlex
+import shutil
 import subprocess
+import textwrap
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +42,33 @@ from .codex_request_ledger import CodexRequestLedger
 from .github_reviews import post_pr_review_comment, poll_for_codex_review, get_pr_repo_from_git
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_MAINTAINER_BOOTSTRAP_PROMPT = textwrap.dedent(
+    """
+    As engineer, act as the Session Manager maintainer service agent for this repository.
+
+    Role:
+    - You own the incoming maintainer queue for Session Manager.
+    - Agents will report bugs and maintenance requests via `sm send maintainer "..."`.
+    - Keep the `maintainer` registry role for this session.
+
+    Workflow:
+    - Investigate against real behavior first; do not speculate from code alone.
+    - File or update a GitHub ticket when needed.
+    - Implement the fix with focused changes and tests.
+    - Restart Session Manager with `launchctl`.
+    - Open a PR, comment `@codex review`, poll about every 3 minutes, address feedback, and if review is clean or silent after reasonable polling, merge and delete the branch.
+    - Restart Session Manager again after merge.
+    - Keep working until the reported issue is resolved end-to-end.
+
+    Communication:
+    - Do not send acknowledgements unless the reporter asks for one.
+    - Use concise status updates only when needed for blockers or explicit follow-up.
+
+    Repository:
+    - Work in {working_dir}.
+    """
+).strip()
 
 ROLE_KEYWORDS = (
     "engineer",
@@ -119,6 +150,26 @@ class SessionManager:
         self._topic_creator: Optional[Callable[..., Awaitable[Optional[int]]]] = None
         self.adoption_proposals: dict[str, AdoptionProposal] = {}
         self.agent_registrations: dict[str, AgentRegistration] = {}
+        self._maintainer_bootstrap_lock = asyncio.Lock()
+
+        maintainer_config = self.config.get("maintainer_agent", {})
+        configured_working_dir = maintainer_config.get("working_dir")
+        default_working_dir = str(Path(__file__).resolve().parents[1])
+        self.maintainer_working_dir = str(configured_working_dir or default_working_dir)
+        self.maintainer_friendly_name = str(
+            maintainer_config.get("friendly_name", "sm-maintainer")
+        ).strip() or "sm-maintainer"
+        preferred_providers = maintainer_config.get("preferred_providers", ["codex-fork", "claude"])
+        if isinstance(preferred_providers, list):
+            normalized_providers = [str(provider).strip() for provider in preferred_providers if str(provider).strip()]
+        else:
+            normalized_providers = ["codex-fork", "claude"]
+        self.maintainer_preferred_providers = normalized_providers or ["codex-fork", "claude"]
+        raw_bootstrap_prompt = maintainer_config.get(
+            "bootstrap_prompt",
+            DEFAULT_MAINTAINER_BOOTSTRAP_PROMPT,
+        )
+        self.maintainer_bootstrap_prompt_template = str(raw_bootstrap_prompt).strip() or DEFAULT_MAINTAINER_BOOTSTRAP_PROMPT
 
         codex_config = self.config.get("codex", {})
         codex_app_config = self.config.get("codex_app_server", codex_config)
@@ -1893,6 +1944,109 @@ class SessionManager:
         registrations = list(self.agent_registrations.values())
         registrations.sort(key=lambda registration: registration.role)
         return registrations
+
+    def _maintainer_bootstrap_prompt(self, working_dir: str) -> str:
+        """Render the maintainer bootstrap prompt for a new service session."""
+        return self.maintainer_bootstrap_prompt_template.replace("{working_dir}", working_dir)
+
+    def _provider_entrypoint_available(self, provider: str) -> bool:
+        """Best-effort preflight for tmux-backed providers used during maintainer bootstrap."""
+        if provider == "codex-fork":
+            command = self.codex_fork_command
+        elif provider == "codex":
+            command = self.codex_cli_command
+        elif provider == "claude":
+            command = self.config.get("claude", {}).get("command", "claude")
+        else:
+            return True
+
+        if not command:
+            return False
+
+        try:
+            entrypoint = shlex.split(str(command))[0]
+        except ValueError:
+            entrypoint = str(command).strip()
+        if not entrypoint:
+            return False
+
+        if "/" in entrypoint or entrypoint.startswith("~"):
+            candidate = Path(entrypoint).expanduser()
+            return candidate.exists() and os.access(candidate, os.X_OK)
+
+        return shutil.which(entrypoint) is not None
+
+    def _resolve_maintainer_working_dir(self) -> str:
+        """Resolve the maintainer service working directory."""
+        candidate = Path(self.maintainer_working_dir).expanduser().resolve()
+        if not candidate.exists():
+            raise ValueError(f"Maintainer working directory does not exist: {candidate}")
+        if not candidate.is_dir():
+            raise ValueError(f"Maintainer working directory is not a directory: {candidate}")
+        return str(candidate)
+
+    async def ensure_maintainer_session(self) -> tuple[Session, bool]:
+        """Return the live maintainer session, spawning it if needed."""
+        existing = self.get_maintainer_session()
+        if existing:
+            return existing, False
+
+        async with self._maintainer_bootstrap_lock:
+            existing = self.get_maintainer_session()
+            if existing:
+                return existing, False
+
+            working_dir = self._resolve_maintainer_working_dir()
+            bootstrap_prompt = self._maintainer_bootstrap_prompt(working_dir)
+            last_error: Optional[str] = None
+
+            for provider in self.maintainer_preferred_providers:
+                if not self._provider_entrypoint_available(provider):
+                    last_error = f"{provider} entrypoint unavailable"
+                    logger.warning(
+                        "Skipping maintainer bootstrap provider %s: entrypoint unavailable",
+                        provider,
+                    )
+                    continue
+
+                session = await self._create_session_common(
+                    working_dir=working_dir,
+                    friendly_name=self.maintainer_friendly_name,
+                    initial_prompt=bootstrap_prompt,
+                    provider=provider,
+                )
+                if not session:
+                    last_error = f"{provider} session creation failed"
+                    logger.warning(
+                        "Maintainer bootstrap failed for provider %s during session creation",
+                        provider,
+                    )
+                    continue
+
+                session.role = "maintainer"
+                self._save_state()
+
+                try:
+                    self.register_agent_role(session.id, "maintainer")
+                except ValueError:
+                    adopted = self.get_maintainer_session()
+                    if adopted and adopted.id != session.id:
+                        self.kill_session(session.id)
+                        return adopted, False
+                    self.kill_session(session.id)
+                    raise
+
+                logger.info(
+                    "Bootstrapped maintainer session %s using provider %s",
+                    session.id,
+                    provider,
+                )
+                return session, True
+
+            detail = "Failed to bootstrap maintainer session"
+            if last_error:
+                detail = f"{detail}: {last_error}"
+            raise RuntimeError(detail)
 
     def set_maintainer_session(self, session_id: str) -> bool:
         """Register one session as the current maintainer alias."""

@@ -1269,20 +1269,40 @@ def cmd_send(
         1: Session not found or send failed
         2: Session manager unavailable
     """
+    sender_session_id = client.session_id  # Set from CLAUDE_SESSION_MANAGER_ID in __init__
+
     # Resolve identifier to session ID and get session details
     session_id, session = resolve_session_id(client, identifier)
     if session_id is None:
-        # Check if it's unavailable or not found
-        sessions = client.list_sessions()
-        if sessions is None:
-            print("Error: Session manager unavailable", file=sys.stderr)
-            return 2
-        else:
-            print(f"Error: Session '{identifier}' not found", file=sys.stderr)
-            return 1
+        if identifier == "maintainer":
+            ensure_result = client.ensure_maintainer(requester_session_id=sender_session_id)
+            if ensure_result.get("unavailable"):
+                print("Error: Session manager unavailable", file=sys.stderr)
+                return 2
+            if not ensure_result.get("ok"):
+                detail = ensure_result.get("detail") or "Failed to bootstrap maintainer session"
+                print(f"Error: {detail}", file=sys.stderr)
+                return 1
 
-    # Get sender session ID from environment (if available)
-    sender_session_id = client.session_id  # Set from CLAUDE_SESSION_MANAGER_ID in __init__
+            payload = ensure_result.get("data") or {}
+            session = payload.get("session") or {}
+            session_id = session.get("id")
+            if not session_id:
+                print("Error: Maintainer bootstrap returned no session", file=sys.stderr)
+                return 1
+            if payload.get("created"):
+                maintainer_name = session.get("friendly_name") or session.get("name") or session_id
+                provider = session.get("provider") or "unknown"
+                print(f"Maintainer bootstrapped: {maintainer_name} ({session_id}) [{provider}]")
+        else:
+            # Check if it's unavailable or not found
+            sessions = client.list_sessions()
+            if sessions is None:
+                print("Error: Session manager unavailable", file=sys.stderr)
+                return 2
+            else:
+                print(f"Error: Session '{identifier}' not found", file=sys.stderr)
+                return 1
 
     # Self-sends are commonly used as delayed wakeups; do not advertise or request
     # stop-notify because it would wake the same agent on its next stop hook.

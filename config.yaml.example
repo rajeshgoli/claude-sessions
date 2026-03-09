@@ -193,6 +193,21 @@ codex_fork:
   # Control client/runtime contract pin.
   event_schema_version: 2
 
+# Optional auto-bootstrap config for `sm send maintainer ...`
+maintainer_agent:
+  working_dir: "/path/to/session-manager"
+  friendly_name: "sm-maintainer"
+  preferred_providers:
+    - "codex-fork"
+    - "claude"
+  bootstrap_prompt: |
+    As engineer, act as the Session Manager maintainer service agent for this repository.
+    - Own the incoming maintainer queue for Session Manager.
+    - Agents will report bugs via `sm send maintainer "..."`.
+    - Investigate against real behavior first, implement fixes with tests, restart SM with launchctl,
+      open a PR, comment `@codex review`, poll for feedback, merge when clean, and restart SM again.
+    - Do not send acknowledgements unless the reporter asks for one.
+
 # Durable codex lifecycle event stream (for /codex-events + activity_state)
 codex_events:
   db_path: "~/.local/share/claude-sessions/codex_events.db"

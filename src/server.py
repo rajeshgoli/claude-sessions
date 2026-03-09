@@ -151,6 +151,12 @@ class AgentRegistrationResponse(BaseModel):
     created_at: str
 
 
+class EnsureMaintainerResponse(BaseModel):
+    """Response payload for maintainer auto-bootstrap."""
+    created: bool
+    session: SessionResponse
+
+
 class SendInputRequest(BaseModel):
     """Request to send input to a session."""
     text: str
@@ -191,6 +197,11 @@ class SetRoleRequest(BaseModel):
 class SetMaintainerRequest(BaseModel):
     """Request to register or clear the maintainer alias."""
     requester_session_id: str
+
+
+class EnsureMaintainerRequest(BaseModel):
+    """Request to ensure the maintainer service session exists."""
+    requester_session_id: Optional[str] = None
 
 
 class RoleRegistrationRequest(BaseModel):
@@ -1583,6 +1594,31 @@ def create_app(
         if not callable(clearer) or not clearer(session_id):
             raise HTTPException(status_code=400, detail="Session is not the active maintainer")
         return _session_to_response(session)
+
+    @app.post("/maintainer/ensure", response_model=EnsureMaintainerResponse)
+    async def ensure_maintainer(request: EnsureMaintainerRequest):
+        """Ensure the maintainer service session exists, bootstrapping it when absent."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        ensurer = getattr(app.state.session_manager, "ensure_maintainer_session", None)
+        if not callable(ensurer):
+            raise HTTPException(status_code=503, detail="Maintainer bootstrap unavailable")
+
+        try:
+            session, created = await ensurer()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        if created and app.state.output_monitor and getattr(session, "provider", "claude") != "codex-app":
+            await app.state.output_monitor.start_monitoring(session)
+
+        return EnsureMaintainerResponse(
+            created=created,
+            session=_session_to_response(session),
+        )
 
     @app.get("/registry")
     async def list_agent_registry():
