@@ -1585,6 +1585,11 @@ class MessageQueueManager:
             if success:
                 # Mark session as active
                 state.is_idle = False
+                if state.stop_notify_delay_seconds > 0:
+                    self._cancel_pending_stop_notification(session_id)
+                    state.stop_notify_sender_id = None
+                    state.stop_notify_sender_name = None
+                    state.stop_notify_delay_seconds = 0
 
                 # Mark messages as delivered
                 for msg in batch:
@@ -1661,6 +1666,11 @@ class MessageQueueManager:
                     self._mark_delivered(msg.id)
                     state = self._get_or_create_state(session_id)
                     state.is_idle = False
+                    if state.stop_notify_delay_seconds > 0:
+                        self._cancel_pending_stop_notification(session_id)
+                        state.stop_notify_sender_id = None
+                        state.stop_notify_sender_name = None
+                        state.stop_notify_delay_seconds = 0
                     logger.info(f"Urgent message {msg.id} delivered to {session_id} (codex-app)")
 
                     # Handle notifications
@@ -1728,6 +1738,11 @@ class MessageQueueManager:
                     self._mark_delivered(msg.id)
                     state = self._get_or_create_state(session_id)
                     state.is_idle = False
+                    if state.stop_notify_delay_seconds > 0:
+                        self._cancel_pending_stop_notification(session_id)
+                        state.stop_notify_sender_id = None
+                        state.stop_notify_sender_name = None
+                        state.stop_notify_delay_seconds = 0
                     logger.info(f"Urgent message {msg.id} delivered to {session_id}")
 
                     # Handle notifications

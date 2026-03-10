@@ -227,6 +227,42 @@ class TestStateManagement:
         assert state.stop_notify_sender_id is None
         assert state.stop_notify_delay_seconds == 0
 
+    @pytest.mark.asyncio
+    async def test_successful_delivery_without_notify_on_stop_clears_delayed_spawn_arm(
+        self,
+        mock_session_manager,
+        temp_db_path,
+    ):
+        """Any real delivery clears the staged spawn arm, even when the new message has no stop notify."""
+        mq = MessageQueueManager(session_manager=mock_session_manager, db_path=temp_db_path, notifier=None)
+
+        session = MagicMock()
+        session.id = "session379c"
+        session.provider = "claude"
+        session.tmux_session = "claude-session379c"
+        session.status = SessionStatus.IDLE
+        session.last_activity = datetime.now()
+        mock_session_manager.get_session = MagicMock(return_value=session)
+        mock_session_manager._deliver_direct = AsyncMock(return_value=True)
+
+        state = mq._get_or_create_state("session379c")
+        state.is_idle = True
+        mq.arm_stop_notify("session379c", "em379", sender_name="em", delay_seconds=30)
+
+        mq._execute("""
+            INSERT INTO message_queue
+            (id, target_session_id, sender_session_id, sender_name, text, delivery_mode, queued_at, notify_on_stop)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, ("msg379c", "session379c", "sender379", "sender",
+              "real work arrived", "sequential", datetime.now().isoformat(), 0))
+
+        mq._get_pending_user_input_async = AsyncMock(return_value=None)
+
+        await mq._try_deliver_messages("session379c")
+
+        assert state.stop_notify_sender_id is None
+        assert state.stop_notify_delay_seconds == 0
+
 
 class TestPendingMessages:
     """Tests for pending message handling."""
