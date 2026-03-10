@@ -597,6 +597,79 @@ class ParentWakeRegistration:
 
 
 @dataclass
+class JobWatchRegistration:
+    """Registration for a durable external job watch (#377)."""
+    id: str
+    target_session_id: str
+    label: str
+    pid: Optional[int]
+    file_path: Optional[str]
+    progress_regex: Optional[str]
+    done_regex: Optional[str]
+    error_regex: Optional[str]
+    exit_code_file: Optional[str]
+    interval_seconds: int
+    tail_lines: int
+    tail_on_error: int
+    notify_on_change: bool
+    created_at: datetime
+    last_polled_at: Optional[datetime] = None
+    last_notified_at: Optional[datetime] = None
+    last_progress_text: Optional[str] = None
+    last_event: Optional[str] = None
+    is_active: bool = True
+
+    def to_dict(self) -> dict:
+        """Convert registration to a JSON-serializable dictionary."""
+        return {
+            "id": self.id,
+            "target_session_id": self.target_session_id,
+            "label": self.label,
+            "pid": self.pid,
+            "file_path": self.file_path,
+            "progress_regex": self.progress_regex,
+            "done_regex": self.done_regex,
+            "error_regex": self.error_regex,
+            "exit_code_file": self.exit_code_file,
+            "interval_seconds": self.interval_seconds,
+            "tail_lines": self.tail_lines,
+            "tail_on_error": self.tail_on_error,
+            "notify_on_change": self.notify_on_change,
+            "created_at": self.created_at.isoformat(),
+            "last_polled_at": self.last_polled_at.isoformat() if self.last_polled_at else None,
+            "last_notified_at": self.last_notified_at.isoformat() if self.last_notified_at else None,
+            "last_progress_text": self.last_progress_text,
+            "last_event": self.last_event,
+            "is_active": self.is_active,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "JobWatchRegistration":
+        """Restore a registration from persisted state."""
+        return cls(
+            id=data["id"],
+            target_session_id=data["target_session_id"],
+            label=data["label"],
+            pid=data.get("pid"),
+            file_path=data.get("file_path"),
+            progress_regex=data.get("progress_regex"),
+            done_regex=data.get("done_regex"),
+            error_regex=data.get("error_regex"),
+            exit_code_file=data.get("exit_code_file"),
+            interval_seconds=int(data["interval_seconds"]),
+            tail_lines=int(data.get("tail_lines", 200)),
+            tail_on_error=int(data.get("tail_on_error", 10)),
+            notify_on_change=bool(data.get("notify_on_change", True)),
+            created_at=datetime.fromisoformat(data["created_at"]),
+            last_polled_at=datetime.fromisoformat(data["last_polled_at"]) if data.get("last_polled_at") else None,
+            last_notified_at=datetime.fromisoformat(data["last_notified_at"]) if data.get("last_notified_at") else None,
+            last_progress_text=data.get("last_progress_text"),
+            last_event=data.get("last_event"),
+            is_active=bool(data.get("is_active", True)),
+        )
+
+
+@dataclass
 class SessionDeliveryState:
     """Tracks delivery state for a session."""
     session_id: str

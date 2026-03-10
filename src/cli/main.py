@@ -164,6 +164,36 @@ def main():
     wait_parser.add_argument("session_id", help="Session ID to monitor")
     wait_parser.add_argument("seconds", type=int, help="Maximum seconds to wait")
 
+    # sm watch-job add/list/cancel
+    watch_job_parser = subparsers.add_parser("watch-job", help="Manage durable external job watches")
+    watch_job_subparsers = watch_job_parser.add_subparsers(dest="watch_job_command")
+
+    watch_job_add_parser = watch_job_subparsers.add_parser("add", help="Register a durable external job watch")
+    watch_job_add_parser.add_argument("--target", help="Session ID or alias to wake (defaults to current session)")
+    watch_job_add_parser.add_argument("--label", help="Human label for notifications")
+    watch_job_add_parser.add_argument("--pid", type=int, help="PID to monitor for liveness")
+    watch_job_add_parser.add_argument("--file", dest="file_path", help="Output/log file to inspect")
+    watch_job_add_parser.add_argument("--progress-regex", help="Regex used to extract progress lines")
+    watch_job_add_parser.add_argument("--done-regex", help="Regex used to detect completion from the file")
+    watch_job_add_parser.add_argument("--error-regex", help="Regex used to detect errors from the file")
+    watch_job_add_parser.add_argument(
+        "--exit-code-file",
+        help="File containing final process exit code; useful because SM cannot inspect arbitrary PID exit codes directly",
+    )
+    watch_job_add_parser.add_argument("--interval", dest="interval_seconds", type=int, default=300, help="Polling interval in seconds")
+    watch_job_add_parser.add_argument("--tail-lines", type=int, default=200, help="How many trailing log lines to inspect")
+    watch_job_add_parser.add_argument("--tail-on-error", type=int, default=10, help="How many trailing lines to include in error notifications")
+    watch_job_add_parser.add_argument("--notify-every-poll", action="store_true", help="Send progress on every poll, not just when it changes")
+
+    watch_job_list_parser = watch_job_subparsers.add_parser("list", help="List durable external job watches")
+    watch_job_list_parser.add_argument("--target", help="Filter by target session ID or alias")
+    watch_job_list_parser.add_argument("--all", action="store_true", help="List all watches instead of defaulting to current session")
+    watch_job_list_parser.add_argument("--json", action="store_true", help="Output JSON")
+    watch_job_list_parser.add_argument("--include-inactive", action="store_true", help="Include inactive watches from current process state")
+
+    watch_job_cancel_parser = watch_job_subparsers.add_parser("cancel", help="Cancel a durable external job watch")
+    watch_job_cancel_parser.add_argument("watch_id", help="Watch ID to cancel")
+
     # sm spawn "<prompt>"
     spawn_parser = subparsers.add_parser("spawn", help="Spawn a child agent session")
     spawn_parser.add_argument(
@@ -661,6 +691,37 @@ def main():
             sys.exit(commands.cmd_remind(client, session_id, delay_seconds, message))
     elif args.command == "wait":
         sys.exit(commands.cmd_wait(client, args.session_id, args.seconds))
+    elif args.command == "watch-job":
+        if args.watch_job_command == "add":
+            sys.exit(commands.cmd_watch_job_add(
+                client,
+                current_session_id=session_id,
+                target_identifier=args.target,
+                label=args.label,
+                pid=args.pid,
+                file_path=args.file_path,
+                progress_regex=args.progress_regex,
+                done_regex=args.done_regex,
+                error_regex=args.error_regex,
+                exit_code_file=args.exit_code_file,
+                interval_seconds=args.interval_seconds,
+                tail_lines=args.tail_lines,
+                tail_on_error=args.tail_on_error,
+                notify_on_change=not args.notify_every_poll,
+            ))
+        if args.watch_job_command == "list":
+            sys.exit(commands.cmd_watch_job_list(
+                client,
+                current_session_id=session_id,
+                target_identifier=args.target,
+                list_all=args.all,
+                include_inactive=args.include_inactive,
+                json_output=args.json,
+            ))
+        if args.watch_job_command == "cancel":
+            sys.exit(commands.cmd_watch_job_cancel(client, args.watch_id))
+        print("Error: watch-job subcommand required (add, list, cancel)", file=sys.stderr)
+        sys.exit(2)
     elif args.command == "spawn":
         provider = "codex-fork" if args.provider == "codex" else args.provider
         sys.exit(commands.cmd_spawn(client, session_id, provider, args.prompt, args.name, args.wait, args.model, args.working_dir, args.json))

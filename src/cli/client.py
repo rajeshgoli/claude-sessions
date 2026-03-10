@@ -1045,6 +1045,75 @@ class SessionManagerClient:
             return None
         return data if success else None
 
+    def create_job_watch(
+        self,
+        target_session_id: str,
+        label: Optional[str] = None,
+        pid: Optional[int] = None,
+        file_path: Optional[str] = None,
+        progress_regex: Optional[str] = None,
+        done_regex: Optional[str] = None,
+        error_regex: Optional[str] = None,
+        exit_code_file: Optional[str] = None,
+        interval_seconds: int = 300,
+        tail_lines: int = 200,
+        tail_on_error: int = 10,
+        notify_on_change: bool = True,
+    ) -> dict:
+        """Create a durable external job watch (#377)."""
+        data, status_code, unavailable = self._request_with_status(
+            "POST",
+            "/job-watches",
+            {
+                "target_session_id": target_session_id,
+                "label": label,
+                "pid": pid,
+                "file_path": file_path,
+                "progress_regex": progress_regex,
+                "done_regex": done_regex,
+                "error_regex": error_regex,
+                "exit_code_file": exit_code_file,
+                "interval_seconds": interval_seconds,
+                "tail_lines": tail_lines,
+                "tail_on_error": tail_on_error,
+                "notify_on_change": notify_on_change,
+            },
+        )
+        if unavailable:
+            return {"ok": False, "unavailable": True, "status_code": None, "data": None, "detail": None}
+        ok = status_code in (200, 201)
+        detail = data.get("detail") if isinstance(data, dict) else None
+        return {"ok": ok, "unavailable": False, "status_code": status_code, "data": data, "detail": detail}
+
+    def list_job_watches(
+        self,
+        target_session_id: Optional[str] = None,
+        include_inactive: bool = False,
+    ) -> Optional[list]:
+        """List durable external job watches (#377)."""
+        params = []
+        if target_session_id:
+            params.append(f"target_session_id={urllib.parse.quote(target_session_id)}")
+        if include_inactive:
+            params.append("include_inactive=true")
+        suffix = f"?{'&'.join(params)}" if params else ""
+        data, success, unavailable = self._request("GET", f"/job-watches{suffix}")
+        if unavailable or not success or not data:
+            return None
+        return data.get("watches", [])
+
+    def cancel_job_watch(self, watch_id: str) -> dict:
+        """Cancel one durable external job watch by ID (#377)."""
+        data, status_code, unavailable = self._request_with_status(
+            "DELETE",
+            f"/job-watches/{urllib.parse.quote(watch_id)}",
+        )
+        if unavailable:
+            return {"ok": False, "unavailable": True, "status_code": None, "data": None, "detail": None}
+        ok = status_code in (200, 201)
+        detail = data.get("detail") if isinstance(data, dict) else None
+        return {"ok": ok, "unavailable": False, "status_code": status_code, "data": data, "detail": detail}
+
     def set_agent_status(self, session_id: str, text: str) -> tuple[bool, bool]:
         """Set agent self-reported status text and reset remind timer (#188)."""
         data, success, unavailable = self._request(

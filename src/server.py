@@ -194,6 +194,46 @@ class PeriodicRemindRequest(BaseModel):
     hard_threshold: int
 
 
+class JobWatchCreateRequest(BaseModel):
+    """Request to create a durable external job watch (#377)."""
+    target_session_id: str
+    label: Optional[str] = None
+    pid: Optional[int] = Field(default=None, gt=0)
+    file_path: Optional[str] = None
+    progress_regex: Optional[str] = None
+    done_regex: Optional[str] = None
+    error_regex: Optional[str] = None
+    exit_code_file: Optional[str] = None
+    interval_seconds: int = Field(default=300, gt=0)
+    tail_lines: int = Field(default=200, gt=0)
+    tail_on_error: int = Field(default=10, gt=0)
+    notify_on_change: bool = True
+
+
+class JobWatchResponse(BaseModel):
+    """Response payload for one durable external job watch."""
+    id: str
+    target_session_id: str
+    target_name: Optional[str] = None
+    label: str
+    pid: Optional[int] = None
+    file_path: Optional[str] = None
+    progress_regex: Optional[str] = None
+    done_regex: Optional[str] = None
+    error_regex: Optional[str] = None
+    exit_code_file: Optional[str] = None
+    interval_seconds: int
+    tail_lines: int
+    tail_on_error: int
+    notify_on_change: bool
+    created_at: str
+    last_polled_at: Optional[str] = None
+    last_notified_at: Optional[str] = None
+    last_progress_text: Optional[str] = None
+    last_event: Optional[str] = None
+    is_active: bool = True
+
+
 class AgentStatusRequest(BaseModel):
     """Request from an agent to self-report its current status (#188). text=None clears status (#283)."""
     text: Optional[str] = None
@@ -719,6 +759,31 @@ def create_app(
             status=session.status.value,
             activity_state=_get_activity_state(session),
             created_at=registration.created_at.isoformat(),
+        )
+
+    def _job_watch_to_response(registration) -> JobWatchResponse:
+        target_session = app.state.session_manager.get_session(registration.target_session_id)
+        return JobWatchResponse(
+            id=registration.id,
+            target_session_id=registration.target_session_id,
+            target_name=_effective_session_name(target_session) if target_session else registration.target_session_id,
+            label=registration.label,
+            pid=registration.pid,
+            file_path=registration.file_path,
+            progress_regex=registration.progress_regex,
+            done_regex=registration.done_regex,
+            error_regex=registration.error_regex,
+            exit_code_file=registration.exit_code_file,
+            interval_seconds=registration.interval_seconds,
+            tail_lines=registration.tail_lines,
+            tail_on_error=registration.tail_on_error,
+            notify_on_change=registration.notify_on_change,
+            created_at=registration.created_at.isoformat(),
+            last_polled_at=registration.last_polled_at.isoformat() if registration.last_polled_at else None,
+            last_notified_at=registration.last_notified_at.isoformat() if registration.last_notified_at else None,
+            last_progress_text=registration.last_progress_text,
+            last_event=registration.last_event,
+            is_active=registration.is_active,
         )
 
     def _response_dict(model: BaseModel) -> dict:
@@ -3428,6 +3493,74 @@ Provide ONLY the summary, no preamble or questions."""
             queue_mgr.cancel_remind(session_id)
 
         return {"status": "cancelled", "session_id": session_id}
+
+    @app.post("/job-watches", response_model=JobWatchResponse)
+    async def create_job_watch(request: JobWatchCreateRequest):
+        """Register a durable external job watch that wakes a target session (#377)."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        target_session = app.state.session_manager.get_session(request.target_session_id)
+        if not target_session:
+            raise HTTPException(status_code=404, detail="Target session not found")
+
+        queue_mgr = app.state.session_manager.message_queue_manager
+        if not queue_mgr:
+            raise HTTPException(status_code=503, detail="Message queue not configured")
+
+        try:
+            registration = queue_mgr.register_job_watch(
+                target_session_id=request.target_session_id,
+                label=request.label,
+                pid=request.pid,
+                file_path=request.file_path,
+                progress_regex=request.progress_regex,
+                done_regex=request.done_regex,
+                error_regex=request.error_regex,
+                exit_code_file=request.exit_code_file,
+                interval_seconds=request.interval_seconds,
+                tail_lines=request.tail_lines,
+                tail_on_error=request.tail_on_error,
+                notify_on_change=request.notify_on_change,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return _job_watch_to_response(registration)
+
+    @app.get("/job-watches")
+    async def list_job_watches(
+        target_session_id: Optional[str] = Query(None),
+        include_inactive: bool = Query(False),
+    ):
+        """List durable external job watches (#377)."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        queue_mgr = app.state.session_manager.message_queue_manager
+        if not queue_mgr:
+            raise HTTPException(status_code=503, detail="Message queue not configured")
+
+        registrations = queue_mgr.list_job_watches(
+            target_session_id=target_session_id,
+            include_inactive=include_inactive,
+        )
+        return {"watches": [_response_dict(_job_watch_to_response(reg)) for reg in registrations]}
+
+    @app.delete("/job-watches/{watch_id}", response_model=JobWatchResponse)
+    async def cancel_job_watch(watch_id: str):
+        """Cancel one durable external job watch by ID (#377)."""
+        if not app.state.session_manager:
+            raise HTTPException(status_code=503, detail="Session manager not configured")
+
+        queue_mgr = app.state.session_manager.message_queue_manager
+        if not queue_mgr:
+            raise HTTPException(status_code=503, detail="Message queue not configured")
+
+        registration = queue_mgr.cancel_job_watch(watch_id)
+        if registration is None:
+            raise HTTPException(status_code=404, detail="Job watch not found")
+        return _job_watch_to_response(registration)
 
     @app.post("/sessions/{session_id}/agent-status")
     async def set_agent_status(session_id: str, request: AgentStatusRequest):

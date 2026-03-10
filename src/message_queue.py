@@ -2,16 +2,26 @@
 
 import asyncio
 import logging
+import os
+import re
 import shlex
 import sqlite3
 import subprocess
 import threading
 import uuid
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Dict, List, Callable, Awaitable, Tuple
 
-from .models import QueuedMessage, SessionDeliveryState, SessionStatus, RemindRegistration, ParentWakeRegistration
+from .models import (
+    JobWatchRegistration,
+    ParentWakeRegistration,
+    QueuedMessage,
+    RemindRegistration,
+    SessionDeliveryState,
+    SessionStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +97,10 @@ class MessageQueueManager:
         self._running = False
         self._monitor_task: Optional[asyncio.Task] = None
         self._scheduled_tasks: Dict[str, asyncio.Task] = {}  # reminder_id -> task
+
+        # Durable external job watches (#377): keyed by watch_id
+        self._job_watches: Dict[str, JobWatchRegistration] = {}
+        self._job_watch_tasks: Dict[str, asyncio.Task] = {}
 
         # Periodic remind registrations (#188): keyed by target_session_id (one-active-per-target)
         self._remind_registrations: Dict[str, RemindRegistration] = {}
@@ -205,6 +219,35 @@ class MessageQueueManager:
             )
         """)
 
+        # Durable external job watches (#377)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS job_watch_registrations (
+                id TEXT PRIMARY KEY,
+                target_session_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                pid INTEGER,
+                file_path TEXT,
+                progress_regex TEXT,
+                done_regex TEXT,
+                error_regex TEXT,
+                exit_code_file TEXT,
+                interval_seconds INTEGER NOT NULL,
+                tail_lines INTEGER NOT NULL,
+                tail_on_error INTEGER NOT NULL,
+                notify_on_change INTEGER DEFAULT 1,
+                created_at TIMESTAMP NOT NULL,
+                last_polled_at TIMESTAMP,
+                last_notified_at TIMESTAMP,
+                last_progress_text TEXT,
+                last_event TEXT,
+                is_active INTEGER DEFAULT 1
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_job_watch_target_active
+            ON job_watch_registrations(target_session_id, is_active)
+        """)
+
         self._db_conn.commit()
         logger.info(f"Message queue database initialized at {self.db_path} (WAL mode enabled)")
 
@@ -218,6 +261,422 @@ class MessageQueueManager:
             if isinstance(display_name, str) and display_name:
                 return display_name
         return getattr(session, "friendly_name", None) or getattr(session, "name", None) or getattr(session, "id", None)
+
+    # =========================================================================
+    # Durable External Job Watches (#377)
+    # =========================================================================
+
+    def register_job_watch(
+        self,
+        target_session_id: str,
+        label: Optional[str] = None,
+        pid: Optional[int] = None,
+        file_path: Optional[str] = None,
+        progress_regex: Optional[str] = None,
+        done_regex: Optional[str] = None,
+        error_regex: Optional[str] = None,
+        exit_code_file: Optional[str] = None,
+        interval_seconds: int = 300,
+        tail_lines: int = 200,
+        tail_on_error: int = 10,
+        notify_on_change: bool = True,
+    ) -> JobWatchRegistration:
+        """Register a durable external job watch and start its polling task."""
+        if not self.session_manager.get_session(target_session_id):
+            raise ValueError(f"Target session {target_session_id} not found")
+        if pid is None and not file_path and not exit_code_file:
+            raise ValueError("job watch requires at least one of pid, file_path, or exit_code_file")
+        if pid is None and not any([progress_regex, done_regex, error_regex, exit_code_file]):
+            raise ValueError("job watch requires a pid or at least one regex/exit-code rule")
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds must be > 0")
+        if tail_lines <= 0:
+            raise ValueError("tail_lines must be > 0")
+        if tail_on_error <= 0:
+            raise ValueError("tail_on_error must be > 0")
+
+        for pattern_name, pattern in (
+            ("progress_regex", progress_regex),
+            ("done_regex", done_regex),
+            ("error_regex", error_regex),
+        ):
+            if pattern:
+                try:
+                    re.compile(pattern)
+                except re.error as exc:
+                    raise ValueError(f"Invalid {pattern_name}: {exc}") from exc
+
+        normalized_file_path = str(Path(file_path).expanduser()) if file_path else None
+        normalized_exit_code_file = str(Path(exit_code_file).expanduser()) if exit_code_file else None
+
+        watch_id = uuid.uuid4().hex[:12]
+        now = datetime.now()
+        effective_label = label or (
+            Path(normalized_file_path).name if normalized_file_path else f"job-{pid or watch_id}"
+        )
+
+        reg = JobWatchRegistration(
+            id=watch_id,
+            target_session_id=target_session_id,
+            label=effective_label,
+            pid=pid,
+            file_path=normalized_file_path,
+            progress_regex=progress_regex,
+            done_regex=done_regex,
+            error_regex=error_regex,
+            exit_code_file=normalized_exit_code_file,
+            interval_seconds=interval_seconds,
+            tail_lines=tail_lines,
+            tail_on_error=tail_on_error,
+            notify_on_change=notify_on_change,
+            created_at=now,
+        )
+        self._job_watches[watch_id] = reg
+        self._execute(
+            """
+            INSERT OR REPLACE INTO job_watch_registrations
+            (id, target_session_id, label, pid, file_path, progress_regex, done_regex, error_regex,
+             exit_code_file, interval_seconds, tail_lines, tail_on_error, notify_on_change,
+             created_at, last_polled_at, last_notified_at, last_progress_text, last_event, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                reg.id,
+                reg.target_session_id,
+                reg.label,
+                reg.pid,
+                reg.file_path,
+                reg.progress_regex,
+                reg.done_regex,
+                reg.error_regex,
+                reg.exit_code_file,
+                reg.interval_seconds,
+                reg.tail_lines,
+                reg.tail_on_error,
+                1 if reg.notify_on_change else 0,
+                reg.created_at.isoformat(),
+                None,
+                None,
+                None,
+                None,
+            ),
+        )
+
+        task = asyncio.create_task(self._run_job_watch_task(reg.id))
+        self._job_watch_tasks[reg.id] = task
+        logger.info(
+            "Registered job watch %s for target=%s label=%s pid=%s interval=%ss",
+            reg.id,
+            reg.target_session_id,
+            reg.label,
+            reg.pid,
+            reg.interval_seconds,
+        )
+        return reg
+
+    def list_job_watches(
+        self,
+        target_session_id: Optional[str] = None,
+        include_inactive: bool = False,
+    ) -> list[JobWatchRegistration]:
+        """List durable job watches, optionally filtered by target session."""
+        watches = list(self._job_watches.values())
+        if target_session_id:
+            watches = [watch for watch in watches if watch.target_session_id == target_session_id]
+        if not include_inactive:
+            watches = [watch for watch in watches if watch.is_active]
+        return sorted(watches, key=lambda watch: watch.created_at)
+
+    def cancel_job_watch(self, watch_id: str) -> Optional[JobWatchRegistration]:
+        """Cancel a durable job watch by ID."""
+        reg = self._job_watches.get(watch_id)
+        if reg is None:
+            return None
+        if reg.is_active:
+            reg.is_active = False
+            self._update_job_watch_db(watch_id, is_active=False)
+        task = self._job_watch_tasks.pop(watch_id, None)
+        if task:
+            task.cancel()
+        logger.info("Cancelled job watch %s", watch_id)
+        return reg
+
+    def _update_job_watch_db(self, watch_id: str, **kwargs) -> None:
+        """Update persisted job watch fields in SQLite."""
+        if not kwargs:
+            return
+        parts = []
+        values = []
+        for key, value in kwargs.items():
+            parts.append(f"{key} = ?")
+            if isinstance(value, datetime):
+                values.append(value.isoformat())
+            elif isinstance(value, bool):
+                values.append(1 if value else 0)
+            else:
+                values.append(value)
+        values.append(watch_id)
+        self._execute(
+            f"UPDATE job_watch_registrations SET {', '.join(parts)} WHERE id = ?",
+            tuple(values),
+        )
+
+    def _tail_file_lines(self, file_path: str, max_lines: int) -> list[str]:
+        """Read the last max_lines lines from a text file without loading the full file."""
+        path = Path(file_path).expanduser()
+        if not path.exists():
+            return []
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                return [line.rstrip("\n") for line in deque(handle, maxlen=max_lines)]
+        except OSError as exc:
+            logger.warning("Failed to read watch file %s: %s", file_path, exc)
+            return []
+
+    @staticmethod
+    def _extract_last_matching_line(lines: list[str], pattern: Optional[str]) -> Optional[str]:
+        """Return the last matching line for a regex pattern."""
+        if not pattern:
+            return None
+        try:
+            matcher = re.compile(pattern)
+        except re.error as exc:
+            logger.warning("Invalid stored job-watch regex %r: %s", pattern, exc)
+            return None
+        for line in reversed(lines):
+            if matcher.search(line):
+                return line.strip()
+        return None
+
+    @staticmethod
+    def _pid_exists(pid: int) -> bool:
+        """Return True if a PID currently exists."""
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+
+    def _read_exit_code(self, exit_code_file: Optional[str]) -> Optional[int]:
+        """Read an integer process exit code from a file, if present."""
+        if not exit_code_file:
+            return None
+        path = Path(exit_code_file).expanduser()
+        if not path.exists():
+            return None
+        try:
+            contents = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError as exc:
+            logger.warning("Failed to read exit code file %s: %s", exit_code_file, exc)
+            return None
+        if not contents:
+            return None
+        try:
+            return int(contents.splitlines()[0].strip())
+        except ValueError:
+            logger.warning("Invalid exit code contents in %s: %r", exit_code_file, contents[:64])
+            return None
+
+    def _evaluate_job_watch(self, reg: JobWatchRegistration) -> dict:
+        """Evaluate one job watch poll and return any notification work to do."""
+        lines = self._tail_file_lines(reg.file_path, reg.tail_lines) if reg.file_path else []
+        pid_alive = self._pid_exists(reg.pid) if reg.pid is not None else None
+        exit_code = None
+        if reg.exit_code_file and (reg.pid is None or pid_alive is False):
+            exit_code = self._read_exit_code(reg.exit_code_file)
+
+        error_line = self._extract_last_matching_line(lines, reg.error_regex)
+        if error_line:
+            error_tail = self._tail_file_lines(reg.file_path, reg.tail_on_error) if reg.file_path else []
+            detail = error_line
+            if error_tail:
+                detail = f"{error_line}\n" + "\n".join(error_tail)
+            return {
+                "event": "error",
+                "message": f"[sm job-watch] {reg.label} ERROR:\n{detail}",
+                "delivery_mode": "important",
+                "deactivate": True,
+            }
+
+        if exit_code is not None:
+            if exit_code == 0:
+                done_line = self._extract_last_matching_line(lines, reg.done_regex)
+                detail = done_line or f"process exited with code 0"
+                return {
+                    "event": "completed",
+                    "message": f"[sm job-watch] {reg.label} COMPLETE: {detail}",
+                    "delivery_mode": "important",
+                    "deactivate": True,
+                }
+
+            error_tail = self._tail_file_lines(reg.file_path, reg.tail_on_error) if reg.file_path else []
+            detail = f"process exited with code {exit_code}"
+            if error_tail:
+                detail = f"{detail}\n" + "\n".join(error_tail)
+            return {
+                "event": "error",
+                "message": f"[sm job-watch] {reg.label} ERROR:\n{detail}",
+                "delivery_mode": "important",
+                "deactivate": True,
+            }
+
+        done_line = self._extract_last_matching_line(lines, reg.done_regex)
+        if done_line:
+            return {
+                "event": "completed",
+                "message": f"[sm job-watch] {reg.label} COMPLETE: {done_line}",
+                "delivery_mode": "important",
+                "deactivate": True,
+            }
+
+        progress_line = self._extract_last_matching_line(lines, reg.progress_regex)
+        if progress_line:
+            progress_changed = progress_line != reg.last_progress_text
+            if progress_changed:
+                reg.last_progress_text = progress_line
+            if progress_changed or not reg.notify_on_change:
+                return {
+                    "event": "progress",
+                    "message": f"[sm job-watch] {reg.label} progress: {progress_line}",
+                    "delivery_mode": "sequential",
+                    "deactivate": False,
+                    "last_progress_text": reg.last_progress_text,
+                }
+
+        if reg.pid is not None and pid_alive is False:
+            return {
+                "event": "exited",
+                "message": (
+                    f"[sm job-watch] {reg.label}: process {reg.pid} exited"
+                    " (no exit-code file or done/error match available)"
+                ),
+                "delivery_mode": "important",
+                "deactivate": True,
+            }
+
+        return {"event": None}
+
+    async def _run_job_watch_task(self, watch_id: str) -> None:
+        """Poll a durable external job watch until it completes or is cancelled."""
+        try:
+            while True:
+                reg = self._job_watches.get(watch_id)
+                if reg is None or not reg.is_active:
+                    return
+
+                await asyncio.sleep(reg.interval_seconds)
+
+                reg = self._job_watches.get(watch_id)
+                if reg is None or not reg.is_active:
+                    return
+
+                if not self.session_manager.get_session(reg.target_session_id):
+                    logger.info(
+                        "Auto-cancelled job watch %s because target session %s no longer exists",
+                        watch_id,
+                        reg.target_session_id,
+                    )
+                    self.cancel_job_watch(watch_id)
+                    return
+
+                result = await asyncio.to_thread(self._evaluate_job_watch, reg)
+                now = datetime.now()
+                reg.last_polled_at = now
+                updates = {"last_polled_at": now}
+
+                event = result.get("event")
+                if event:
+                    reg.last_event = event
+                    reg.last_notified_at = now
+                    updates["last_event"] = event
+                    updates["last_notified_at"] = now
+                    if "last_progress_text" in result:
+                        updates["last_progress_text"] = result["last_progress_text"]
+
+                    self.queue_message(
+                        target_session_id=reg.target_session_id,
+                        text=result["message"],
+                        delivery_mode=result["delivery_mode"],
+                    )
+                    logger.info(
+                        "Job watch %s queued %s notification for %s",
+                        watch_id,
+                        event,
+                        reg.target_session_id,
+                    )
+                    if result.get("deactivate"):
+                        reg.is_active = False
+                        updates["is_active"] = False
+                elif reg.last_progress_text is not None:
+                    updates["last_progress_text"] = reg.last_progress_text
+
+                self._update_job_watch_db(watch_id, **updates)
+
+                if result.get("deactivate"):
+                    return
+
+        except asyncio.CancelledError:
+            logger.info("Job watch task cancelled for %s", watch_id)
+        finally:
+            self._job_watch_tasks.pop(watch_id, None)
+
+    async def _recover_job_watches(self) -> None:
+        """Recover active external job watches on server restart."""
+        rows = self._execute_query(
+            """
+            SELECT id, target_session_id, label, pid, file_path, progress_regex, done_regex, error_regex,
+                   exit_code_file, interval_seconds, tail_lines, tail_on_error, notify_on_change,
+                   created_at, last_polled_at, last_notified_at, last_progress_text, last_event, is_active
+            FROM job_watch_registrations
+            WHERE is_active = 1
+            """
+        )
+
+        for row in rows:
+            reg = JobWatchRegistration(
+                id=row[0],
+                target_session_id=row[1],
+                label=row[2],
+                pid=row[3],
+                file_path=row[4],
+                progress_regex=row[5],
+                done_regex=row[6],
+                error_regex=row[7],
+                exit_code_file=row[8],
+                interval_seconds=row[9],
+                tail_lines=row[10],
+                tail_on_error=row[11],
+                notify_on_change=bool(row[12]),
+                created_at=datetime.fromisoformat(row[13]),
+                last_polled_at=datetime.fromisoformat(row[14]) if row[14] else None,
+                last_notified_at=datetime.fromisoformat(row[15]) if row[15] else None,
+                last_progress_text=row[16],
+                last_event=row[17],
+                is_active=bool(row[18]),
+            )
+            if not self.session_manager.get_session(reg.target_session_id):
+                self._update_job_watch_db(reg.id, is_active=False)
+                logger.info(
+                    "Skipped recovery for job watch %s because target session %s is gone",
+                    reg.id,
+                    reg.target_session_id,
+                )
+                continue
+            self._job_watches[reg.id] = reg
+            task = asyncio.create_task(self._run_job_watch_task(reg.id))
+            self._job_watch_tasks[reg.id] = task
+            logger.info(
+                "Recovered job watch %s for target=%s label=%s",
+                reg.id,
+                reg.target_session_id,
+                reg.label,
+            )
 
     def _execute(self, query: str, params=()) -> sqlite3.Cursor:
         """
@@ -288,6 +747,8 @@ class MessageQueueManager:
         await self._recover_remind_registrations()
         # Recover active parent wake registrations (#225-C)
         await self._recover_parent_wake_registrations()
+        # Recover active external job watches (#377)
+        await self._recover_job_watches()
         # Recover pending messages - trigger delivery for sessions with queued messages
         await self._recover_pending_messages()
         logger.info("Message queue manager started")
@@ -322,6 +783,9 @@ class MessageQueueManager:
     async def stop(self):
         """Stop the queue monitoring service."""
         self._running = False
+        for task in self._job_watch_tasks.values():
+            task.cancel()
+        self._job_watch_tasks.clear()
         if self._monitor_task:
             self._monitor_task.cancel()
             try:
