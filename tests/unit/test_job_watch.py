@@ -126,14 +126,57 @@ def test_evaluate_job_watch_notifies_only_on_progress_change(mq, mock_session_ma
     first = mq._evaluate_job_watch(reg)
     assert first["event"] == "progress"
     assert "bars processed: 10" in first["message"]
+    reg.last_file_offset = first["last_file_offset"]
 
     second = mq._evaluate_job_watch(reg)
     assert second["event"] is None
+    reg.last_file_offset = second["last_file_offset"]
 
-    log_path.write_text("bars processed: 10\nbars processed: 20\n")
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write("bars processed: 20\n")
     third = mq._evaluate_job_watch(reg)
     assert third["event"] == "progress"
     assert "bars processed: 20" in third["message"]
+
+
+def test_evaluate_job_watch_ignores_stale_terminal_lines(mq, mock_session_manager, tmp_path):
+    session = _make_session("agent007", tmp_path)
+    mock_session_manager.get_session.return_value = session
+    log_path = tmp_path / "checkpoint.log"
+    log_path.write_text("Done: previous run completed\n")
+    initial_size = log_path.stat().st_size
+
+    reg = JobWatchRegistration(
+        id="watch-stale",
+        target_session_id=session.id,
+        label="checkpoint-build",
+        pid=12345,
+        file_path=str(log_path),
+        progress_regex="bars processed",
+        done_regex="Done:",
+        error_regex="Traceback",
+        exit_code_file=None,
+        interval_seconds=60,
+        tail_lines=200,
+        tail_on_error=10,
+        notify_on_change=True,
+        created_at=session.created_at,
+        file_start_offset=initial_size,
+        last_file_offset=initial_size,
+    )
+
+    with patch.object(mq, "_pid_exists", return_value=True):
+        first = mq._evaluate_job_watch(reg)
+    assert first["event"] is None
+    assert first["last_file_offset"] == initial_size
+
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write("bars processed: 42\n")
+
+    with patch.object(mq, "_pid_exists", return_value=True):
+        second = mq._evaluate_job_watch(reg)
+    assert second["event"] == "progress"
+    assert "bars processed: 42" in second["message"]
 
 
 def test_evaluate_job_watch_uses_exit_code_file_after_pid_exit(mq, mock_session_manager, tmp_path):
@@ -301,3 +344,20 @@ def test_cmd_watch_job_add_list_and_cancel(capsys, tmp_path):
     assert rc == 0
     client.cancel_job_watch.assert_called_once_with("watch123")
     assert "Cancelled job watch: checkpoint-build (watch123)" in capsys.readouterr().out
+
+
+def test_cmd_watch_job_list_requires_explicit_scope_without_session(capsys):
+    client = MagicMock()
+
+    rc = cmd_watch_job_list(
+        client,
+        current_session_id=None,
+        target_identifier=None,
+        list_all=False,
+        include_inactive=False,
+        json_output=False,
+    )
+
+    assert rc == 2
+    client.list_job_watches.assert_not_called()
+    assert "Use --target or --all" in capsys.readouterr().err

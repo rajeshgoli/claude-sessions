@@ -236,6 +236,8 @@ class MessageQueueManager:
                 tail_on_error INTEGER NOT NULL,
                 notify_on_change INTEGER DEFAULT 1,
                 created_at TIMESTAMP NOT NULL,
+                file_start_offset INTEGER,
+                last_file_offset INTEGER,
                 last_polled_at TIMESTAMP,
                 last_notified_at TIMESTAMP,
                 last_progress_text TEXT,
@@ -247,6 +249,14 @@ class MessageQueueManager:
             CREATE INDEX IF NOT EXISTS idx_job_watch_target_active
             ON job_watch_registrations(target_session_id, is_active)
         """)
+        cursor.execute("PRAGMA table_info(job_watch_registrations)")
+        job_watch_columns = [col[1] for col in cursor.fetchall()]
+        if "file_start_offset" not in job_watch_columns:
+            cursor.execute("ALTER TABLE job_watch_registrations ADD COLUMN file_start_offset INTEGER")
+            logger.info("Migrated job_watch_registrations: added file_start_offset column")
+        if "last_file_offset" not in job_watch_columns:
+            cursor.execute("ALTER TABLE job_watch_registrations ADD COLUMN last_file_offset INTEGER")
+            logger.info("Migrated job_watch_registrations: added last_file_offset column")
 
         self._db_conn.commit()
         logger.info(f"Message queue database initialized at {self.db_path} (WAL mode enabled)")
@@ -308,6 +318,7 @@ class MessageQueueManager:
 
         normalized_file_path = str(Path(file_path).expanduser()) if file_path else None
         normalized_exit_code_file = str(Path(exit_code_file).expanduser()) if exit_code_file else None
+        initial_file_offset = self._get_file_size(normalized_file_path) if normalized_file_path else None
 
         watch_id = uuid.uuid4().hex[:12]
         now = datetime.now()
@@ -330,6 +341,8 @@ class MessageQueueManager:
             tail_on_error=tail_on_error,
             notify_on_change=notify_on_change,
             created_at=now,
+            file_start_offset=initial_file_offset,
+            last_file_offset=initial_file_offset,
         )
         self._job_watches[watch_id] = reg
         self._execute(
@@ -337,8 +350,9 @@ class MessageQueueManager:
             INSERT OR REPLACE INTO job_watch_registrations
             (id, target_session_id, label, pid, file_path, progress_regex, done_regex, error_regex,
              exit_code_file, interval_seconds, tail_lines, tail_on_error, notify_on_change,
-             created_at, last_polled_at, last_notified_at, last_progress_text, last_event, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+             created_at, file_start_offset, last_file_offset, last_polled_at, last_notified_at,
+             last_progress_text, last_event, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             """,
             (
                 reg.id,
@@ -355,6 +369,8 @@ class MessageQueueManager:
                 reg.tail_on_error,
                 1 if reg.notify_on_change else 0,
                 reg.created_at.isoformat(),
+                reg.file_start_offset,
+                reg.last_file_offset,
                 None,
                 None,
                 None,
@@ -434,6 +450,40 @@ class MessageQueueManager:
             return []
 
     @staticmethod
+    def _get_file_size(file_path: Optional[str]) -> Optional[int]:
+        """Return the current file size in bytes, or None when unavailable."""
+        if not file_path:
+            return None
+        path = Path(file_path).expanduser()
+        try:
+            return path.stat().st_size
+        except OSError:
+            return None
+
+    def _read_new_lines(
+        self,
+        file_path: str,
+        offset: Optional[int],
+        max_lines: int,
+    ) -> tuple[list[str], Optional[int]]:
+        """Read appended file content since offset, retaining only the latest lines."""
+        path = Path(file_path).expanduser()
+        if not path.exists():
+            return [], offset
+        try:
+            current_size = path.stat().st_size
+            start_offset = 0 if offset is None else offset
+            if current_size < start_offset:
+                start_offset = 0
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                handle.seek(start_offset)
+                lines = deque((line.rstrip("\n") for line in handle), maxlen=max_lines)
+            return list(lines), current_size
+        except OSError as exc:
+            logger.warning("Failed to read appended watch content from %s: %s", file_path, exc)
+            return [], offset
+
+    @staticmethod
     def _extract_last_matching_line(lines: list[str], pattern: Optional[str]) -> Optional[str]:
         """Return the last matching line for a regex pattern."""
         if not pattern:
@@ -485,7 +535,14 @@ class MessageQueueManager:
 
     def _evaluate_job_watch(self, reg: JobWatchRegistration) -> dict:
         """Evaluate one job watch poll and return any notification work to do."""
-        lines = self._tail_file_lines(reg.file_path, reg.tail_lines) if reg.file_path else []
+        lines = []
+        next_file_offset = reg.last_file_offset
+        if reg.file_path:
+            lines, next_file_offset = self._read_new_lines(
+                reg.file_path,
+                reg.last_file_offset if reg.last_file_offset is not None else reg.file_start_offset,
+                reg.tail_lines,
+            )
         pid_alive = self._pid_exists(reg.pid) if reg.pid is not None else None
         exit_code = None
         if reg.exit_code_file and (reg.pid is None or pid_alive is False):
@@ -502,6 +559,7 @@ class MessageQueueManager:
                 "message": f"[sm job-watch] {reg.label} ERROR:\n{detail}",
                 "delivery_mode": "important",
                 "deactivate": True,
+                "last_file_offset": next_file_offset,
             }
 
         if exit_code is not None:
@@ -513,6 +571,7 @@ class MessageQueueManager:
                     "message": f"[sm job-watch] {reg.label} COMPLETE: {detail}",
                     "delivery_mode": "important",
                     "deactivate": True,
+                    "last_file_offset": next_file_offset,
                 }
 
             error_tail = self._tail_file_lines(reg.file_path, reg.tail_on_error) if reg.file_path else []
@@ -524,6 +583,7 @@ class MessageQueueManager:
                 "message": f"[sm job-watch] {reg.label} ERROR:\n{detail}",
                 "delivery_mode": "important",
                 "deactivate": True,
+                "last_file_offset": next_file_offset,
             }
 
         done_line = self._extract_last_matching_line(lines, reg.done_regex)
@@ -533,6 +593,7 @@ class MessageQueueManager:
                 "message": f"[sm job-watch] {reg.label} COMPLETE: {done_line}",
                 "delivery_mode": "important",
                 "deactivate": True,
+                "last_file_offset": next_file_offset,
             }
 
         progress_line = self._extract_last_matching_line(lines, reg.progress_regex)
@@ -547,6 +608,7 @@ class MessageQueueManager:
                     "delivery_mode": "sequential",
                     "deactivate": False,
                     "last_progress_text": reg.last_progress_text,
+                    "last_file_offset": next_file_offset,
                 }
 
         if reg.pid is not None and pid_alive is False:
@@ -558,9 +620,10 @@ class MessageQueueManager:
                 ),
                 "delivery_mode": "important",
                 "deactivate": True,
+                "last_file_offset": next_file_offset,
             }
 
-        return {"event": None}
+        return {"event": None, "last_file_offset": next_file_offset}
 
     async def _run_job_watch_task(self, watch_id: str) -> None:
         """Poll a durable external job watch until it completes or is cancelled."""
@@ -591,6 +654,9 @@ class MessageQueueManager:
                 updates = {"last_polled_at": now}
 
                 event = result.get("event")
+                if "last_file_offset" in result:
+                    reg.last_file_offset = result["last_file_offset"]
+                    updates["last_file_offset"] = result["last_file_offset"]
                 if event:
                     reg.last_event = event
                     reg.last_notified_at = now
@@ -632,7 +698,8 @@ class MessageQueueManager:
             """
             SELECT id, target_session_id, label, pid, file_path, progress_regex, done_regex, error_regex,
                    exit_code_file, interval_seconds, tail_lines, tail_on_error, notify_on_change,
-                   created_at, last_polled_at, last_notified_at, last_progress_text, last_event, is_active
+                   created_at, file_start_offset, last_file_offset, last_polled_at, last_notified_at,
+                   last_progress_text, last_event, is_active
             FROM job_watch_registrations
             WHERE is_active = 1
             """
@@ -654,11 +721,13 @@ class MessageQueueManager:
                 tail_on_error=row[11],
                 notify_on_change=bool(row[12]),
                 created_at=datetime.fromisoformat(row[13]),
-                last_polled_at=datetime.fromisoformat(row[14]) if row[14] else None,
-                last_notified_at=datetime.fromisoformat(row[15]) if row[15] else None,
-                last_progress_text=row[16],
-                last_event=row[17],
-                is_active=bool(row[18]),
+                file_start_offset=row[14],
+                last_file_offset=row[15],
+                last_polled_at=datetime.fromisoformat(row[16]) if row[16] else None,
+                last_notified_at=datetime.fromisoformat(row[17]) if row[17] else None,
+                last_progress_text=row[18],
+                last_event=row[19],
+                is_active=bool(row[20]),
             )
             if not self.session_manager.get_session(reg.target_session_id):
                 self._update_job_watch_db(reg.id, is_active=False)

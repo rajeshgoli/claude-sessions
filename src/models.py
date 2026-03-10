@@ -613,6 +613,8 @@ class JobWatchRegistration:
     tail_on_error: int
     notify_on_change: bool
     created_at: datetime
+    file_start_offset: Optional[int] = None
+    last_file_offset: Optional[int] = None
     last_polled_at: Optional[datetime] = None
     last_notified_at: Optional[datetime] = None
     last_progress_text: Optional[str] = None
@@ -636,6 +638,8 @@ class JobWatchRegistration:
             "tail_on_error": self.tail_on_error,
             "notify_on_change": self.notify_on_change,
             "created_at": self.created_at.isoformat(),
+            "file_start_offset": self.file_start_offset,
+            "last_file_offset": self.last_file_offset,
             "last_polled_at": self.last_polled_at.isoformat() if self.last_polled_at else None,
             "last_notified_at": self.last_notified_at.isoformat() if self.last_notified_at else None,
             "last_progress_text": self.last_progress_text,
@@ -661,6 +665,8 @@ class JobWatchRegistration:
             tail_on_error=int(data.get("tail_on_error", 10)),
             notify_on_change=bool(data.get("notify_on_change", True)),
             created_at=datetime.fromisoformat(data["created_at"]),
+            file_start_offset=data.get("file_start_offset"),
+            last_file_offset=data.get("last_file_offset"),
             last_polled_at=datetime.fromisoformat(data["last_polled_at"]) if data.get("last_polled_at") else None,
             last_notified_at=datetime.fromisoformat(data["last_notified_at"]) if data.get("last_notified_at") else None,
             last_progress_text=data.get("last_progress_text"),

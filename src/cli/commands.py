@@ -2677,6 +2677,9 @@ def cmd_watch_job_list(
             return 2
     elif not list_all and current_session_id:
         target_session_id = current_session_id
+    elif not list_all:
+        print("Error: No session context. Use --target or --all.", file=sys.stderr)
+        return 2
 
     watches = client.list_job_watches(target_session_id=target_session_id, include_inactive=include_inactive)
     if watches is None:
