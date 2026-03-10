@@ -2562,6 +2562,186 @@ def cmd_wait(
     return 0
 
 
+def cmd_watch_job_add(
+    client: SessionManagerClient,
+    current_session_id: Optional[str],
+    target_identifier: Optional[str],
+    label: Optional[str],
+    pid: Optional[int],
+    file_path: Optional[str],
+    progress_regex: Optional[str],
+    done_regex: Optional[str],
+    error_regex: Optional[str],
+    exit_code_file: Optional[str],
+    interval_seconds: int,
+    tail_lines: int,
+    tail_on_error: int,
+    notify_on_change: bool,
+) -> int:
+    """
+    Register a durable external job watch (#377).
+
+    Exit codes:
+        0: Success
+        1: Validation/API failure
+        2: Session manager unavailable / no target context
+    """
+    target_session_id = None
+    if target_identifier:
+        target_session_id, _ = resolve_session_id(client, target_identifier)
+        if target_session_id is None:
+            sessions = client.list_sessions()
+            if sessions is None:
+                print("Error: Session manager unavailable", file=sys.stderr)
+                return 2
+            print(f"Error: Session '{target_identifier}' not found", file=sys.stderr)
+            return 1
+    else:
+        target_session_id = current_session_id
+
+    if not target_session_id:
+        print("Error: No target session. Use --target or run from within a managed session.", file=sys.stderr)
+        return 2
+
+    normalized_file_path = str(Path(file_path).expanduser().resolve()) if file_path else None
+    normalized_exit_code_file = str(Path(exit_code_file).expanduser().resolve()) if exit_code_file else None
+
+    result = client.create_job_watch(
+        target_session_id=target_session_id,
+        label=label,
+        pid=pid,
+        file_path=normalized_file_path,
+        progress_regex=progress_regex,
+        done_regex=done_regex,
+        error_regex=error_regex,
+        exit_code_file=normalized_exit_code_file,
+        interval_seconds=interval_seconds,
+        tail_lines=tail_lines,
+        tail_on_error=tail_on_error,
+        notify_on_change=notify_on_change,
+    )
+    if result.get("unavailable"):
+        print("Error: Session manager unavailable", file=sys.stderr)
+        return 2
+    if not result.get("ok"):
+        detail = result.get("detail") or "Failed to create job watch"
+        print(f"Error: {detail}", file=sys.stderr)
+        return 1
+
+    payload = result.get("data") or {}
+    watch_id = payload.get("id", "unknown")
+    target_name = payload.get("target_name") or payload.get("target_session_id") or target_session_id
+    effective_label = payload.get("label") or label or watch_id
+    print(f"Job watch registered: {effective_label} ({watch_id}) -> {target_name}")
+    extras = [f"interval={payload.get('interval_seconds', interval_seconds)}s"]
+    if payload.get("pid") is not None:
+        extras.append(f"pid={payload['pid']}")
+    if payload.get("file_path"):
+        extras.append(f"file={payload['file_path']}")
+    if payload.get("exit_code_file"):
+        extras.append(f"exit-code-file={payload['exit_code_file']}")
+    if payload.get("notify_on_change", notify_on_change):
+        extras.append("notify-on-change")
+    else:
+        extras.append("notify-every-poll")
+    print(f"  Options: {', '.join(extras)}")
+    return 0
+
+
+def cmd_watch_job_list(
+    client: SessionManagerClient,
+    current_session_id: Optional[str],
+    target_identifier: Optional[str],
+    list_all: bool,
+    include_inactive: bool,
+    json_output: bool = False,
+) -> int:
+    """
+    List durable external job watches (#377).
+
+    Exit codes:
+        0: Success
+        2: Session manager unavailable / target not found
+    """
+    import json as json_lib
+
+    target_session_id = None
+    if target_identifier:
+        target_session_id, _ = resolve_session_id(client, target_identifier)
+        if target_session_id is None:
+            sessions = client.list_sessions()
+            if sessions is None:
+                print("Error: Session manager unavailable", file=sys.stderr)
+                return 2
+            print(f"Error: Session '{target_identifier}' not found", file=sys.stderr)
+            return 2
+    elif not list_all and current_session_id:
+        target_session_id = current_session_id
+    elif not list_all:
+        print("Error: No session context. Use --target or --all.", file=sys.stderr)
+        return 2
+
+    watches = client.list_job_watches(target_session_id=target_session_id, include_inactive=include_inactive)
+    if watches is None:
+        print("Error: Session manager unavailable", file=sys.stderr)
+        return 2
+
+    if json_output:
+        print(json_lib.dumps(watches, indent=2))
+        return 0
+
+    if not watches:
+        print("No job watches.")
+        return 0
+
+    headers = ["ID", "Target", "Label", "State", "PID", "Last Event", "Interval"]
+    rows = []
+    for watch in watches:
+        rows.append([
+            str(watch.get("id", "")),
+            str(watch.get("target_name") or watch.get("target_session_id") or ""),
+            str(watch.get("label", "")),
+            "active" if watch.get("is_active", True) else "inactive",
+            str(watch.get("pid") or "-"),
+            str(watch.get("last_event") or "-"),
+            f"{watch.get('interval_seconds', '-')}" + ("s" if watch.get("interval_seconds") else ""),
+        ])
+
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for idx, value in enumerate(row):
+            widths[idx] = max(widths[idx], len(value))
+
+    print("  ".join(header.ljust(widths[idx]) for idx, header in enumerate(headers)))
+    print("  ".join("-" * widths[idx] for idx in range(len(headers))))
+    for row in rows:
+        print("  ".join(value.ljust(widths[idx]) for idx, value in enumerate(row)))
+    return 0
+
+
+def cmd_watch_job_cancel(client: SessionManagerClient, watch_id: str) -> int:
+    """
+    Cancel a durable external job watch (#377).
+
+    Exit codes:
+        0: Success
+        1: Not found / API failure
+        2: Session manager unavailable
+    """
+    result = client.cancel_job_watch(watch_id)
+    if result.get("unavailable"):
+        print("Error: Session manager unavailable", file=sys.stderr)
+        return 2
+    if not result.get("ok"):
+        detail = result.get("detail") or "Failed to cancel job watch"
+        print(f"Error: {detail}", file=sys.stderr)
+        return 1
+
+    payload = result.get("data") or {}
+    print(f"Cancelled job watch: {payload.get('label', watch_id)} ({payload.get('id', watch_id)})")
+    return 0
+
+
 def cmd_review(
     client: SessionManagerClient,
     parent_session_id: Optional[str],

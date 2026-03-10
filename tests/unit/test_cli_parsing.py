@@ -53,6 +53,33 @@ class TestCliParsing:
         wait_parser.add_argument("session_id")
         wait_parser.add_argument("seconds", type=int)
 
+        # sm watch-job
+        watch_job_parser = subparsers.add_parser("watch-job")
+        watch_job_subparsers = watch_job_parser.add_subparsers(dest="watch_job_command")
+
+        watch_job_add = watch_job_subparsers.add_parser("add")
+        watch_job_add.add_argument("--target")
+        watch_job_add.add_argument("--label")
+        watch_job_add.add_argument("--pid", type=int)
+        watch_job_add.add_argument("--file", dest="file_path")
+        watch_job_add.add_argument("--progress-regex")
+        watch_job_add.add_argument("--done-regex")
+        watch_job_add.add_argument("--error-regex")
+        watch_job_add.add_argument("--exit-code-file")
+        watch_job_add.add_argument("--interval", dest="interval_seconds", type=int, default=300)
+        watch_job_add.add_argument("--tail-lines", type=int, default=200)
+        watch_job_add.add_argument("--tail-on-error", type=int, default=10)
+        watch_job_add.add_argument("--notify-every-poll", action="store_true")
+
+        watch_job_list = watch_job_subparsers.add_parser("list")
+        watch_job_list.add_argument("--target")
+        watch_job_list.add_argument("--all", action="store_true")
+        watch_job_list.add_argument("--json", action="store_true")
+        watch_job_list.add_argument("--include-inactive", action="store_true")
+
+        watch_job_cancel = watch_job_subparsers.add_parser("cancel")
+        watch_job_cancel.add_argument("watch_id")
+
         # sm children
         children_parser = subparsers.add_parser("children")
         children_parser.add_argument("session_id", nargs="?")
@@ -531,3 +558,49 @@ class TestParseDuration:
         # but if someone passes 0 it should fail
         with pytest.raises(ValueError, match="Duration must be positive"):
             parse_duration("0h0m0s")
+
+
+class TestWatchJobCommand:
+    """Tests for 'sm watch-job' command parsing."""
+
+    def test_watch_job_add(self):
+        parser = TestCliParsing()
+        args = parser._get_parsed_args([
+            "watch-job",
+            "add",
+            "--target", "maintainer",
+            "--label", "checkpoint-build",
+            "--pid", "12345",
+            "--file", "/tmp/job.log",
+            "--progress-regex", "bars processed",
+            "--interval", "120",
+            "--notify-every-poll",
+        ])
+
+        assert args.command == "watch-job"
+        assert args.watch_job_command == "add"
+        assert args.target == "maintainer"
+        assert args.label == "checkpoint-build"
+        assert args.pid == 12345
+        assert args.file_path == "/tmp/job.log"
+        assert args.progress_regex == "bars processed"
+        assert args.interval_seconds == 120
+        assert args.notify_every_poll is True
+
+    def test_watch_job_list(self):
+        parser = TestCliParsing()
+        args = parser._get_parsed_args(["watch-job", "list", "--all", "--json", "--include-inactive"])
+
+        assert args.command == "watch-job"
+        assert args.watch_job_command == "list"
+        assert args.all is True
+        assert args.json is True
+        assert args.include_inactive is True
+
+    def test_watch_job_cancel(self):
+        parser = TestCliParsing()
+        args = parser._get_parsed_args(["watch-job", "cancel", "watch123"])
+
+        assert args.command == "watch-job"
+        assert args.watch_job_command == "cancel"
+        assert args.watch_id == "watch123"
