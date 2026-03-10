@@ -194,6 +194,39 @@ class TestStateManagement:
         """is_session_idle returns False for unknown sessions."""
         assert message_queue.is_session_idle("unknown") is False
 
+    @pytest.mark.asyncio
+    async def test_delayed_spawn_stop_notify_is_sent_after_grace_period(self, mock_session_manager, temp_db_path):
+        """Spawn-armed stop notifications wait briefly before paging the parent (#379)."""
+        mq = MessageQueueManager(session_manager=mock_session_manager, db_path=temp_db_path, notifier=None)
+        state = mq._get_or_create_state("session379a")
+        state.is_idle = True
+        mq.arm_stop_notify("session379a", "em379", sender_name="em", delay_seconds=0.01)
+        with patch.object(mq, "_send_stop_notification", new=AsyncMock()) as mock_notify:
+            mq.mark_session_idle("session379a")
+            await asyncio.sleep(0.03)
+
+        mock_notify.assert_awaited_once()
+        assert state.stop_notify_sender_id is None
+        assert state.stop_notify_delay_seconds == 0
+
+    @pytest.mark.asyncio
+    async def test_mark_session_active_cancels_delayed_spawn_stop_notify(self, mock_session_manager, temp_db_path):
+        """A real dispatch arriving during the spawn grace window cancels the pending page (#379)."""
+        mq = MessageQueueManager(session_manager=mock_session_manager, db_path=temp_db_path, notifier=None)
+        state = mq._get_or_create_state("session379b")
+        state.is_idle = True
+        mq.arm_stop_notify("session379b", "em379", sender_name="em", delay_seconds=0.05)
+
+        with patch.object(mq, "_send_stop_notification", new=AsyncMock()) as mock_notify:
+            mq.mark_session_idle("session379b")
+            await asyncio.sleep(0)
+            mq.mark_session_active("session379b")
+            await asyncio.sleep(0.08)
+
+        mock_notify.assert_not_awaited()
+        assert state.stop_notify_sender_id is None
+        assert state.stop_notify_delay_seconds == 0
+
 
 class TestPendingMessages:
     """Tests for pending message handling."""
